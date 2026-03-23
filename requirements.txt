@@ -1,5 +1,4 @@
 PyQt5
 PyQt-Fluent-Widgets
-pywxdump
-win10toast
 watchdog
+winotify
