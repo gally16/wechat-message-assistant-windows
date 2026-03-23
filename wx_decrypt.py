@@ -13,7 +13,7 @@ from typing import List, Dict
 PAGE_SZ = 4096
 
 # wechat-decrypt 路径
-wechat_decrypt_path = os.path.join(os.path.dirname(__file__), 'wechat_decrypt_temp')
+wechat_decrypt_path = os.path.join(os.path.dirname(__file__), 'wechat-decrypt')
 keys_file = os.path.join(wechat_decrypt_path, 'all_keys.json')
 config_file = os.path.join(wechat_decrypt_path, 'config.json')
 
