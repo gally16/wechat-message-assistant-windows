@@ -5,6 +5,7 @@ import sqlite3
 import logging
 import threading
 import ctypes
+import struct
 from datetime import datetime
 from collections import deque
 
@@ -59,6 +60,15 @@ except ImportError as e:
     print(f"缺少必要的库：{e}")
     print("请运行：pip install watchdog xmltodict zstandard pycryptodome cryptography pillow yara-python aiofiles")
     sys.exit(1)
+
+# wechat-decrypt 常量（用于快速解密）
+PAGE_SZ = 4096
+RESERVE_SZ = 80
+KEY_SZ = 32
+SALT_SZ = 16
+SQLITE_HDR = b'SQLite format 3\x00'
+WAL_HEADER_SZ = 32
+WAL_FRAME_HEADER_SZ = 24
 
 # --- 全局配置与日志 ---
 LOG_STREAM = deque(maxlen=100)
@@ -139,12 +149,19 @@ class WeChatMonitorWorker(QObject):
         self.key = None
         self.db_path = None
         self.micro_db_path = None
+        self.session_db_path = None
         
         self.temp_dir = config.get('temp_dir', './temp_data')
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir)
         self.db_backup = os.path.join(self.temp_dir, "msg_decrypted.db")
         self.micro_backup = os.path.join(self.temp_dir, "micro_decrypted.db")
+        
+        # 用于跟踪 session 状态
+        self.prev_session_state = {}
+        
+        # 全局缓存的已解密 session.db 路径
+        self.session_decrypted_path = os.path.join(self.temp_dir, "session_cache.db")
 
     def log(self, msg):
         logger.info(msg)
@@ -160,6 +177,25 @@ class WeChatMonitorWorker(QObject):
             self.key = self.wx_info.get('key')
             self.db_path = self.wx_info.get('msg_path')
             self.micro_db_path = self.wx_info.get('micro_path')
+            
+            # 计算 session.db 路径
+            wx_dir = os.path.dirname(os.path.dirname(self.db_path))
+            self.session_db_path = os.path.join(wx_dir, "session", "session.db")
+            
+            # 从 all_keys.json 获取 session.db 的专用密钥
+            keys_file = os.path.join(os.path.dirname(__file__), 'wechat-decrypt', 'all_keys.json')
+            if os.path.exists(keys_file):
+                import json
+                with open(keys_file, 'r', encoding='utf-8') as f:
+                    all_keys = json.load(f)
+                
+                # 获取 session.db 的密钥
+                session_key_info = all_keys.get('session\\session.db', {})
+                self.session_key = session_key_info.get('enc_key', self.key)
+                self.log(f"session.db 密钥：{self.session_key[:20]}...")
+            else:
+                self.session_key = self.key
+                self.log("未找到 all_keys.json，使用 message.db 的密钥")
             
             if not self.key or not self.db_path:
                 raise Exception("获取密钥或路径失败")
@@ -178,23 +214,73 @@ class WeChatMonitorWorker(QObject):
             conn = sqlite3.connect(self.micro_backup)
             cursor = conn.cursor()
             
-            # 微信 4.x: 尝试多种方式加载联系人
-            # 1. 首先尝试使用 id 字段（整数类型）
-            cursor.execute("SELECT id, username, nick_name, remark FROM contact WHERE id IS NOT NULL;")
+            # 微信 4.x: 加载联系人
+            cursor.execute("SELECT username, nick_name, remark FROM contact WHERE username IS NOT NULL;")
             for row in cursor.fetchall():
-                uid, uname, nick, remark = row
+                uname, nick, remark = row
                 name = remark if remark else nick
-                if name: 
-                    # 同时使用整数和字符串形式存储
-                    self.contact_map[int(uid)] = name
-                    self.contact_map[str(uid)] = name
-            conn.close()
+                if name and uname:
+                    # 存储 username -> name 的映射
+                    self.contact_map[uname] = name
+            
+            # 保存 cursor 用于后续查询
+            self.contact_cursor = cursor
+            self.contact_conn = conn
             
             self.log(f"联系人加载完成：{len(self.contact_map)} 个")
+            
+            # 初始化 session 状态（避免历史消息重复推送）
+            self.init_session_state()
+            
         except Exception as e:
             self.log(f"加载联系人失败：{str(e)}")
             import traceback
             self.log(f"错误详情：{traceback.format_exc()}")
+    
+    def init_session_state(self):
+        """初始化 session 状态，避免历史消息重复推送"""
+        if not self.session_db_path or not os.path.exists(self.session_db_path):
+            return
+        
+        try:
+            # 解密 session.db
+            from wx_decrypt import decrypt as wx_decrypt
+            session_backup = os.path.join(os.path.dirname(self.db_backup), "session_init.db")
+            wx_decrypt(self.key, self.session_db_path, session_backup)
+            
+            # 查询当前状态
+            conn = sqlite3.connect(session_backup)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT username, last_timestamp, last_msg_type
+                FROM SessionTable WHERE last_timestamp > 0
+            """)
+            
+            for row in cursor.fetchall():
+                username, timestamp, msg_type = row
+                self.prev_session_state[username] = {
+                    'timestamp': timestamp,
+                    'msg_type': msg_type,
+                }
+            
+            conn.close()
+            
+            # 清理临时文件
+            try:
+                if os.path.exists(session_backup):
+                    os.remove(session_backup)
+                if os.path.exists(session_backup + "-wal"):
+                    os.remove(session_backup + "-wal")
+                if os.path.exists(session_backup + "-shm"):
+                    os.remove(session_backup + "-shm")
+            except:
+                pass
+            
+            self.log(f"已初始化 session 状态，跟踪 {len(self.prev_session_state)} 个会话")
+        
+        except Exception as e:
+            self.log(f"初始化 session 状态失败：{str(e)}")
 
     def decrypt_msg_db(self):
         if not os.path.exists(self.db_path):
@@ -207,132 +293,324 @@ class WeChatMonitorWorker(QObject):
             return False
 
     def process_messages(self):
-        if not self.decrypt_msg_db():
-            self.log("解密失败，跳过处理")
+        """从 session.db 获取新消息（速度快，准确）"""
+        if not self.session_db_path or not os.path.exists(self.session_db_path):
+            self.log("session.db 不存在")
             return
-
+        
         try:
-            self.log("开始处理消息...")
-            conn = sqlite3.connect(self.db_backup)
-            cursor = conn.cursor()
+            # 解密 session.db
+            from wx_decrypt import decrypt as wx_decrypt
+            session_backup = os.path.join(os.path.dirname(self.db_backup), "session_decrypted.db")
+            wx_decrypt(self.key, self.session_db_path, session_backup)
             
-            # 微信 4.x: 获取所有 Msg_开头的表
-            self.log(f"查询消息表...")
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")
-            msg_tables = [row[0] for row in cursor.fetchall()]
-            self.log(f"找到 {len(msg_tables)} 个消息表：{msg_tables}")
-            
-            if not msg_tables:
-                conn.close()
-                return
-            
-            total_count = 0
-            last_sender = ""
-            
-            # 查询所有消息表
-            for table_name in msg_tables:
+            # 处理 WAL
+            wal_path = self.session_db_path + "-wal"
+            if os.path.exists(wal_path):
                 try:
-                    # 每个表有独立的 local_id 序列
-                    table_last_id = self.last_local_id_map.get(table_name, 0)
-                    self.log(f"查询表 {table_name}，last_local_id={table_last_id}")
-                    # 微信 4.x 字段：local_id, real_sender_id, create_time, message_content, compress_content
-                    query = f"""
-                        SELECT local_id, real_sender_id, create_time, message_content, compress_content
-                        FROM {table_name}
-                        WHERE local_id > ?
-                        ORDER BY local_id ASC
-                    """
-                    cursor.execute(query, (table_last_id,))
-                    rows = cursor.fetchall()
-                    self.log(f"表 {table_name} 查询到 {len(rows)} 条新消息")
-                    
-                    for row in rows:
-                        local_id, real_sender_id, create_time, content, compress_content = row
-                        self.log(f"找到新消息 local_id={local_id}, sender={real_sender_id}")
-                        
-                        # 尝试解压/解密消息内容
-                        msg_text = self.extract_message_content(content, compress_content)
-                        if not msg_text:
-                            self.log(f"消息内容为空，跳过")
-                            continue
-                        
-                        # 获取发送者名称 - real_sender_id 可能是整数或字符串
-                        sender_name = self.contact_map.get(real_sender_id)
-                        
-                        # 如果找不到，尝试转换为字符串查找
-                        if not sender_name and real_sender_id is not None:
-                            sender_name = self.contact_map.get(str(real_sender_id))
-                        
-                        if not sender_name:
-                            # 如果联系表中找不到，尝试更详细的日志
-                            self.log(f"⚠️ 未找到联系人 ID={real_sender_id} (type={type(real_sender_id).__name__})，使用 ID 显示")
-                            sender_name = f"ID:{real_sender_id}" if real_sender_id else "未知"
-                        
-                        self.send_notification(sender_name, msg_text, create_time)
-                        last_sender = sender_name
-                        total_count += 1
-                    
-                    # 更新该表的最大 ID
-                    if rows:
-                        cursor.execute(f"SELECT MAX(local_id) FROM {table_name}")
-                        result = cursor.fetchone()
-                        if result and result[0]:
-                            self.last_local_id_map[table_name] = result[0]
-                            self.log(f"表 {table_name} 更新最大 ID 为 {result[0]}")
-                            
-                except Exception as e:
-                    import traceback
-                    self.log(f"查询表 {table_name} 失败：{str(e)}")
-                    self.log(f"错误详情：{traceback.format_exc()}")
-                    continue
-            
-            conn.close()
-            
-            self.log(f"本轮处理完成，共 {total_count} 条新消息，last_local_id_map 更新为 {self.last_local_id_map}")
-            
-            if total_count > 0:
-                self.msg_count_signal.emit(total_count)
-                self.last_msg_signal.emit(f"{last_sender}: ...")
-                self.log(f"处理了 {total_count} 条新消息")
-                
-        except Exception as e:
-            self.log(f"处理消息出错：{str(e)}")
-    
-    def extract_message_content(self, content, compress_content):
-        """提取消息文本内容（微信 4.x）"""
-        try:
-            # 如果是明文，直接返回
-            if content and isinstance(content, str):
-                return content.strip()
-            
-            # 尝试从 compress_content 提取
-            if compress_content:
-                if isinstance(compress_content, str) and compress_content.strip():
-                    return compress_content.strip()
-            
-            # 如果是二进制数据，尝试简单处理
-            if isinstance(content, bytes):
-                # 尝试 UTF-8 解码
-                try:
-                    text = content.decode('utf-8', errors='ignore').strip()
-                    if text:
-                        return text
+                    conn_wal = sqlite3.connect(session_backup)
+                    conn_wal.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    conn_wal.close()
                 except:
                     pass
             
-            return ""
+            # 查询 session 状态
+            conn = sqlite3.connect(session_backup)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT username, unread_count, summary, last_timestamp,
+                       last_msg_type, last_msg_sender, last_sender_display_name
+                FROM SessionTable WHERE last_timestamp > 0
+            """)
+            
+            total_count = 0
+            for row in cursor.fetchall():
+                username, unread, summary, timestamp, msg_type, sender, sender_name = row
+                
+                # 检查是否是新消息
+                if username in self.prev_session_state:
+                    prev = self.prev_session_state[username]
+                    if timestamp <= prev['timestamp']:
+                        continue
+                
+                # 获取聊天显示名称
+                display = self.contact_map.get(username, username)
+                is_group = '@chatroom' in username
+                
+                # 获取发送者
+                if is_group:
+                    # 群聊：使用 last_sender_display_name 或从联系人查找
+                    final_sender = sender_name or self.contact_map.get(sender, sender)
+                else:
+                    # 单聊：直接使用聊天名称
+                    final_sender = display
+                
+                # 解析消息内容
+                if isinstance(summary, bytes):
+                    try:
+                        summary = summary.decode('utf-8', errors='replace')
+                    except:
+                        summary = '(压缩内容)'
+                
+                # 群消息格式：wxid_xxx:\n内容，提取内容
+                if summary and ':\n' in summary:
+                    summary = summary.split(':\n', 1)[1]
+                
+                # 根据消息类型显示
+                msg_text = self.format_message_content(summary, msg_type)
+                
+                # 发送通知
+                if final_sender and final_sender != display:
+                    notification_text = f"{final_sender}: {msg_text}"
+                else:
+                    notification_text = msg_text
+                
+                self.send_notification(display, notification_text, timestamp)
+                total_count += 1
+                
+                # 更新状态
+                self.prev_session_state[username] = {
+                    'timestamp': timestamp,
+                    'msg_type': msg_type,
+                }
+            
+            conn.close()
+            
+            # 清理临时文件
+            try:
+                if os.path.exists(session_backup):
+                    os.remove(session_backup)
+                if os.path.exists(session_backup + "-wal"):
+                    os.remove(session_backup + "-wal")
+                if os.path.exists(session_backup + "-shm"):
+                    os.remove(session_backup + "-shm")
+            except:
+                pass
+            
+            if total_count > 0:
+                self.log(f"处理了 {total_count} 条新消息")
+        
         except Exception as e:
-            self.log(f"提取消息内容失败：{str(e)}")
+            self.log(f"处理消息失败：{str(e)}")
+            import traceback
+            self.log(f"错误详情：{traceback.format_exc()}")
+    
+    def run_polling(self):
+        """主动轮询模式（直接调用 monitor_web.py 的函数）"""
+        if not self.session_db_path or not os.path.exists(self.session_db_path):
+            self.log("session.db 不存在")
+            return
+        
+        wal_path = self.session_db_path + "-wal"
+        
+        # 使用 session.db 的专用密钥
+        if isinstance(self.session_key, str):
+            enc_key = bytes.fromhex(self.session_key)
+        else:
+            enc_key = self.session_key
+        
+        # 导入 monitor_web.py 的函数
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'wechat-decrypt'))
+        from monitor_web import full_decrypt, decrypt_wal_full
+        
+        # 初始全量解密 + WAL patch
+        self.log("初始解密 session.db...")
+        t0 = time.time()
+        try:
+            pages, ms = full_decrypt(self.session_db_path, self.session_decrypted_path, enc_key)
+            self.log(f"full_decrypt 返回：{pages}页，{ms:.1f}ms")
+            
+            wal_patched, wal_ms = decrypt_wal_full(wal_path, self.session_decrypted_path, enc_key)
+            t1 = time.time()
+            self.log(f"初始解密完成：{(t1-t0)*1000:.1f}ms, WAL patch {wal_patched}页")
+            
+            # 验证解密后的文件
+            if os.path.exists(self.session_decrypted_path):
+                sz = os.path.getsize(self.session_decrypted_path)
+                self.log(f"解密后的文件大小：{sz} bytes")
+                
+                # 尝试用 SQLite 验证
+                try:
+                    test_conn = sqlite3.connect(f"file:{self.session_decrypted_path}?mode=ro", uri=True)
+                    test_conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+                    test_conn.close()
+                    self.log("✓ 解密后的数据库文件验证成功")
+                except Exception as verify_err:
+                    self.log(f"✗ 解密后的数据库验证失败：{verify_err}")
+        except Exception as e:
+            self.log(f"初始解密失败：{e}")
+            import traceback
+            self.log(f"错误详情：{traceback.format_exc()}")
+            return
+        
+        prev_wal_mtime = os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0
+        prev_db_mtime = os.path.getmtime(self.session_db_path)
+        
+        # 轮询间隔 30ms
+        poll_interval = 0.03
+        self.log(f"轮询间隔：{poll_interval*1000:.0f}ms")
+        
+        poll_count = 0
+        last_log_time = time.time()
+        
+        while self.running:
+            time.sleep(poll_interval)
+            poll_count += 1
+            
+            try:
+                # 检测文件变化
+                wal_mtime = os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0
+                db_mtime = os.path.getmtime(self.session_db_path)
+                
+                if wal_mtime == prev_wal_mtime and db_mtime == prev_db_mtime:
+                    continue
+                
+                # 文件有变化，立即解密 + 推送（参考 monitor_web.py，零延迟）
+                t_start = time.time()
+                
+                # 1. 解密主数据库
+                pages, ms = full_decrypt(self.session_db_path, self.session_decrypted_path, enc_key)
+                
+                # 2. patch WAL
+                wal_patched, wal_ms = decrypt_wal_full(wal_path, self.session_decrypted_path, enc_key)
+                
+                # 3. 立即查询并推送
+                self.process_and_push()
+                
+                t_end = time.time()
+                
+                # 每 5 秒打印一次状态
+                if time.time() - last_log_time > 5:
+                    elapsed = (t_end - t_start) * 1000
+                    self.log(f"轮询：{poll_count} 次，解密 + 推送耗时 {elapsed:.1f}ms, WAL {wal_patched}页")
+                    last_log_time = time.time()
+                
+                prev_wal_mtime = wal_mtime
+                prev_db_mtime = db_mtime
+                
+            except Exception as e:
+                self.log(f"轮询错误：{str(e)}")
+                time.sleep(0.1)
+        
+        self.log(f"轮询结束，共 {poll_count} 次")
+    
+    def process_and_push(self):
+        """查询并推送（完全参考 monitor_web.py，零延迟）"""
+        if not os.path.exists(self.session_decrypted_path):
+            return
+        
+        try:
+            # 使用只读模式查询（避免锁冲突）
+            conn = sqlite3.connect(f"file:{self.session_decrypted_path}?mode=ro", uri=True)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT username, unread_count, summary, last_timestamp,
+                       last_msg_type, last_msg_sender, last_sender_display_name
+                FROM SessionTable WHERE last_timestamp > 0
+            """)
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # 收集所有新消息
+            new_msgs = []
+            for row in rows:
+                username, unread, summary, timestamp, msg_type, sender, sender_name = row
+                
+                # 检查是否是新消息
+                if username in self.prev_session_state:
+                    prev = self.prev_session_state[username]
+                    if timestamp <= prev['timestamp']:
+                        continue
+                
+                # 获取聊天显示名称
+                display = self.contact_map.get(username, username)
+                is_group = '@chatroom' in username
+                
+                # 获取发送者（群聊显示真实发送者，单聊显示聊天名称）
+                if is_group:
+                    final_sender = sender_name or self.contact_map.get(sender, sender)
+                else:
+                    final_sender = display
+                
+                # 解析消息内容
+                if isinstance(summary, bytes):
+                    try:
+                        summary = summary.decode('utf-8', errors='replace')
+                    except:
+                        summary = '(压缩内容)'
+                
+                # 群消息格式：wxid_xxx:\n内容，提取内容
+                if summary and ':\n' in summary:
+                    summary = summary.split(':\n', 1)[1]
+                
+                # 根据消息类型显示
+                msg_text = self.format_message_content(summary, msg_type)
+                
+                # 发送通知（立即推送，不等待）
+                if final_sender and final_sender != display:
+                    notification_text = f"{final_sender}: {msg_text}"
+                else:
+                    notification_text = msg_text
+                
+                self.send_notification(display, notification_text, timestamp)
+                new_msgs.append(notification_text)
+                
+                # 更新状态
+                self.prev_session_state[username] = {
+                    'timestamp': timestamp,
+                    'msg_type': msg_type,
+                }
+            
+            if new_msgs:
+                self.log(f"推送 {len(new_msgs)} 条消息")
+        
+        except sqlite3.DatabaseError as e:
+            # 数据库损坏错误，通常是解密过程中微信正在写入
+            # 忽略这次查询，等待下一次轮询
+            if 'malformed' in str(e):
+                pass  # 静默跳过，不打印日志
+            else:
+                self.log(f"数据库错误：{str(e)}")
+        except Exception as e:
+            self.log(f"处理消息失败：{str(e)}")
+            import traceback
+            self.log(f"错误详情：{traceback.format_exc()}")
+    
+    def format_message_content(self, summary, msg_type):
+        """根据消息类型格式化内容"""
+        if not summary:
             return ""
-
-
+        
+        # 根据消息类型显示
+        if msg_type == 1:  # 文本
+            return summary[:50] + "..." if len(summary) > 50 else summary
+        elif msg_type == 3:  # 图片
+            return "[图片]"
+        elif msg_type == 34:  # 语音
+            return "[语音]"
+        elif msg_type == 43:  # 视频
+            return "[视频]"
+        elif msg_type == 47:  # 表情/动画
+            return "[表情]"
+        elif msg_type == 49:  # 富媒体（链接、文件、小程序等）
+            return "[富媒体消息]"
+        elif msg_type == 50:  # 语音通话
+            return "[语音通话]"
+        elif msg_type == 10000:  # 系统消息
+            return summary
+        else:
+            return summary[:50] + "..." if len(summary) > 50 else summary
+    
     def send_notification(self, sender, content, create_time):
         if not self.config.get('enable_notify', True):
             return
             
         time_str = datetime.fromtimestamp(create_time).strftime('%H:%M:%S')
-        title = "微信"
-        msg = f"{sender}: {content[:50]}..." if len(content) > 50 else f"{sender}: {content}"
+        title = f"{sender}"
+        msg = f"{content[:50]}..." if len(content) > 50 else f"{content}"
         
         # 使用 winotify 发送 Windows 10/11 通知
         if HAS_WINOTIFY:
@@ -341,7 +619,7 @@ class WeChatMonitorWorker(QObject):
                 icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.png')
                 
                 toast = Notification(
-                    app_id="微信消息通知",
+                    app_id="微信消息",
                     title=title,
                     msg=msg,
                     icon=icon_path
@@ -366,76 +644,25 @@ class WeChatMonitorWorker(QObject):
         self.load_contacts()
         
         self.log("正在初始同步...")
-        if self.decrypt_msg_db():
-            try:
-                conn = sqlite3.connect(self.db_backup)
-                cursor = conn.cursor()
-                # 微信 4.x: 获取所有 Msg_开头的表并找到最大 local_id
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")
-                # 微信 4.x: 每个表有独立的 local_id 序列，需要分别记录
-                self.last_local_id_map = {}  # table_name -> max_local_id
-                msg_tables = [row[0] for row in cursor.fetchall()]
-                for table_name in msg_tables:
-                    try:
-                        cursor.execute(f"SELECT MAX(local_id) FROM {table_name}")
-                        result = cursor.fetchone()
-                        self.last_local_id_map[table_name] = result[0] if result and result[0] else 0
-                    except:
-                        self.last_local_id_map[table_name] = 0
-                self.log(f"初始同步完成，各表最大 ID: {self.last_local_id_map}")
-                conn.close()
-                self.log(f"初始同步完成，ID: {self.last_local_id}")
-            except: pass
-        else:
-            self.status_signal.emit("error")
-            return
-
-        class Handler(FileSystemEventHandler):
-            def __init__(self, worker):
-                self.worker = worker
-                self.last_trigger = 0
-                self.lock = threading.Lock()
-                self.debounce = float(self.worker.config.get('debounce_time', 1.0))
-
-            def on_modified(self, event):
-                # 记录所有文件变化
-                self.worker.log(f"📁 文件变化：{event.src_path}")
-                if event.is_directory:
-                    return
-                
-                now = time.time()
-                with self.lock:
-                    if now - self.last_trigger < self.debounce:
-                        self.worker.log(f"  ⏱️ 防抖动跳过")
-                        return
-                    self.last_trigger = now
-                
-                self.worker.log(f"  ✅ 触发消息处理")
-                threading.Thread(target=self._delayed_process, daemon=True).start()
-
-            def _delayed_process(self):
-                time.sleep(0.3)
-                if self.worker.running:
-                    self.worker.process_messages()
-
-        event_handler = Handler(self)
-        self.observer = Observer()
-        self.observer.schedule(event_handler, path=os.path.dirname(self.db_path), recursive=False)
-        self.observer.start()
-        self.log("监听服务已启动")
-
-        while self.running:
-            time.sleep(1)
+        # 初始同步只需要加载联系人和 session 状态，不需要解密 message 数据库
+        self.log("初始同步完成")
         
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
+        # 使用主动轮询模式（参考 wechat-decrypt，30ms 延迟）
+        self.log("启动轮询监听（30ms 间隔）...")
+        self.run_polling()
+        
         self.status_signal.emit("stopped")
         self.log("监听服务已停止")
         self.finished.emit()
 
     def stop(self):
         self.running = False
+        # 关闭数据库连接
+        if hasattr(self, 'contact_conn'):
+            try:
+                self.contact_conn.close()
+            except:
+                pass
 
 # --- UI 界面部分 ---
 
