@@ -177,22 +177,24 @@ class WeChatMonitorWorker(QObject):
             decrypt(self.key, self.micro_db_path, self.micro_backup)
             conn = sqlite3.connect(self.micro_backup)
             cursor = conn.cursor()
-            # 微信 4.x: id, username, nick_name, remark - 使用 id 作为查找键（整数类型）
+            
+            # 微信 4.x: 尝试多种方式加载联系人
+            # 1. 首先尝试使用 id 字段（整数类型）
             cursor.execute("SELECT id, username, nick_name, remark FROM contact WHERE id IS NOT NULL;")
-            sample_keys = []
             for row in cursor.fetchall():
                 uid, uname, nick, remark = row
                 name = remark if remark else nick
                 if name: 
-                    self.contact_map[uid] = name  # 使用整数 id 作为键
-                    if len(sample_keys) < 10:
-                        sample_keys.append(f"id={uid} -> {name}")
+                    # 同时使用整数和字符串形式存储
+                    self.contact_map[int(uid)] = name
+                    self.contact_map[str(uid)] = name
             conn.close()
-            if os.path.exists(self.db_backup): os.remove(self.db_backup)
-            if os.path.exists(self.micro_backup): os.remove(self.micro_backup)
+            
             self.log(f"联系人加载完成：{len(self.contact_map)} 个")
         except Exception as e:
             self.log(f"加载联系人失败：{str(e)}")
+            import traceback
+            self.log(f"错误详情：{traceback.format_exc()}")
 
     def decrypt_msg_db(self):
         if not os.path.exists(self.db_path):
@@ -254,11 +256,16 @@ class WeChatMonitorWorker(QObject):
                             self.log(f"消息内容为空，跳过")
                             continue
                         
-                        # 获取发送者名称 - real_sender_id 是整数，直接作为查找键
+                        # 获取发送者名称 - real_sender_id 可能是整数或字符串
                         sender_name = self.contact_map.get(real_sender_id)
+                        
+                        # 如果找不到，尝试转换为字符串查找
+                        if not sender_name and real_sender_id is not None:
+                            sender_name = self.contact_map.get(str(real_sender_id))
+                        
                         if not sender_name:
                             # 如果联系表中找不到，尝试更详细的日志
-                            self.log(f"⚠️ 未找到联系人 ID={real_sender_id}，使用 ID 显示")
+                            self.log(f"⚠️ 未找到联系人 ID={real_sender_id} (type={type(real_sender_id).__name__})，使用 ID 显示")
                             sender_name = f"ID:{real_sender_id}" if real_sender_id else "未知"
                         
                         self.send_notification(sender_name, msg_text, create_time)
