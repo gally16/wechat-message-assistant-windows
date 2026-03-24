@@ -257,7 +257,8 @@ class WeChatMonitorWorker(QObject):
                         # 获取发送者名称 - real_sender_id 是整数，直接作为查找键
                         sender_name = self.contact_map.get(real_sender_id)
                         if not sender_name:
-                            # 如果联系表中找不到，使用 sender_id 或者显示为未知
+                            # 如果联系表中找不到，尝试更详细的日志
+                            self.log(f"⚠️ 未找到联系人 ID={real_sender_id}，使用 ID 显示")
                             sender_name = f"ID:{real_sender_id}" if real_sender_id else "未知"
                         
                         self.send_notification(sender_name, msg_text, create_time)
@@ -329,10 +330,14 @@ class WeChatMonitorWorker(QObject):
         # 使用 winotify 发送 Windows 10/11 通知
         if HAS_WINOTIFY:
             try:
+                # 获取图标路径（相对于项目根目录）
+                icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.png')
+                
                 toast = Notification(
                     app_id="微信消息通知",
                     title=title,
-                    msg=msg
+                    msg=msg,
+                    icon=icon_path
                 )
                 toast.show()
                 self.log(f"winotify 通知已发送：{title} - {msg}")
@@ -627,6 +632,8 @@ class MainWindow(FluentWidget):
         self.themeListener = SystemThemeListener(self)
 
         # 设置窗口图标和标题
+        icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.ico')
+        self.setWindowIcon(QIcon(icon_path))
         self.setWindowTitle("微信消息通知助手")
         self.resize(600, 700)
 
@@ -672,6 +679,10 @@ if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
     app = QApplication(sys.argv)
+    
+    # 设置应用图标
+    icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.ico')
+    app.setWindowIcon(QIcon(icon_path))
     
     from qfluentwidgets import Theme, setTheme
     setTheme(Theme.AUTO)
