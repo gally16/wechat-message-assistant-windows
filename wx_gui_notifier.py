@@ -22,7 +22,7 @@ except ImportError:
 # PyQt5 & QFluentWidgets
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QSize, pyqtSlot
 from PyQt5.QtGui import QIcon, QFont, QColor
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QSlider, QSpinBox, QLabel
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QSlider, QSpinBox, QLabel, QSystemTrayIcon, QMenu, QAction
 
 from qfluentwidgets import (
     FluentWidget, NavigationItemPosition, MessageBox, 
@@ -897,15 +897,91 @@ class MainWindow(FluentWidget):
 
         # 启动主题监听器
         self.themeListener.start()
-
+        
+        # 初始化系统托盘
+        self._init_system_tray(icon_path)
+    
     def on_theme_changed(self):
         """主题变化时的回调函数"""
         pass
-
-    def closeEvent(self, event):
+    
+    def _init_system_tray(self, icon_path):
+        """初始化系统托盘图标和菜单"""
+        # 创建系统托盘图标
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon(icon_path))
+        self.tray_icon.setToolTip("微信消息通知助手")
+        
+        # 创建托盘菜单
+        tray_menu = QMenu()
+        
+        # 显示主窗口动作
+        self.show_action = QAction("显示主窗口", self)
+        self.show_action.triggered.connect(self.show_window)
+        tray_menu.addAction(self.show_action)
+        
+        # 启动/停止服务动作
+        self.toggle_service_action = QAction("启动服务", self)
+        self.toggle_service_action.triggered.connect(self.toggle_service)
+        tray_menu.addAction(self.toggle_service_action)
+        
+        tray_menu.addSeparator()
+        
+        # 退出动作
+        exit_action = QAction("退出", self)
+        exit_action.triggered.connect(self.quit_app)
+        tray_menu.addAction(exit_action)
+        
+        # 设置托盘菜单
+        self.tray_icon.setContextMenu(tray_menu)
+        
+        # 连接双击信号
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        
+        # 显示托盘图标
+        self.tray_icon.show()
+    
+    def on_tray_icon_activated(self, reason):
+        """托盘图标被激活时的处理"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show_window()
+    
+    def show_window(self):
+        """显示主窗口"""
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+    
+    def toggle_service(self):
+        """切换服务状态"""
+        if self.interface.worker and self.interface.worker.running:
+            self.interface.stop_service()
+        else:
+            self.interface.start_service()
+    
+    def quit_app(self):
+        """退出应用"""
         if self.interface.worker:
             self.interface.stop_service()
-        event.accept()
+        self.tray_icon.hide()
+        QApplication.quit()
+    
+    def closeEvent(self, event):
+        """处理窗口关闭事件 - 最小化到托盘而不是退出"""
+        # 如果有后台服务在运行，则最小化到托盘
+        if self.interface.worker and self.interface.worker.running:
+            event.ignore()  # 忽略关闭事件
+            self.hide()  # 隐藏窗口
+            self.tray_icon.showMessage(
+                "微信消息通知助手",
+                "已最小化到系统托盘，双击托盘图标可恢复窗口",
+                QSystemTrayIcon.Information,
+                2000
+            )
+        else:
+            # 如果服务未运行，直接退出
+            event.accept()
+            self.quit_app()
 
 if __name__ == "__main__":
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -922,5 +998,5 @@ if __name__ == "__main__":
     setTheme(Theme.AUTO)
     
     w = MainWindow()
-    w.show()
+    w.show()  # 正常显示主窗口
     sys.exit(app.exec_())
