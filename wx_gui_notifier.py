@@ -594,6 +594,11 @@ class WeChatMonitorWorker(QObject):
             
             if new_msgs:
                 self.log(f"推送 {len(new_msgs)} 条消息")
+                # 发送消息数量信号
+                self.msg_count_signal.emit(len(new_msgs))
+                # 发送最后一条消息信号
+                if new_msgs:
+                    self.last_msg_signal.emit(new_msgs[-1][:20])
             else:
                 self.log("没有新消息")
         
@@ -769,16 +774,6 @@ class Interface(QWidget):
         self.status_label.setTextColor(QColor(100, 100, 100), QColor(200, 200, 200))  # 浅色主题，深色主题
         status_layout.addWidget(self.status_label)
         
-        # 消息统计
-        self.count_label = BodyLabel("已处理消息：0")
-        self.count_label.setTextColor(QColor(100, 100, 100), QColor(200, 200, 200))  # 浅色主题，深色主题
-        status_layout.addWidget(self.count_label)
-        
-        # 最后消息
-        self.last_msg_label = BodyLabel("最后消息：无")
-        self.last_msg_label.setTextColor(QColor(100, 100, 100), QColor(200, 200, 200))  # 浅色主题，深色主题
-        status_layout.addWidget(self.last_msg_label)
-        
         # 添加到卡片布局
         status_card.layout().addWidget(status_widget)
         self.status_group.addSettingCard(status_card)
@@ -832,8 +827,9 @@ class Interface(QWidget):
         
         self.worker.log_signal.connect(self.update_log)
         self.worker.status_signal.connect(self.update_status)
-        self.worker.msg_count_signal.connect(self.update_count)
-        self.worker.last_msg_signal.connect(self.update_last_msg)
+        # 移除了消息统计信号，因为 UI 中不再显示
+        # self.worker.msg_count_signal.connect(self.update_count)
+        # self.worker.last_msg_signal.connect(self.update_last_msg)
         # 移除了 notify_signal 连接，因为现在只使用 Windows 系统通知
         
         self.thread.started.connect(self.worker.run)
@@ -846,6 +842,10 @@ class Interface(QWidget):
         logging.info("工作线程已启动")
         InfoBar.success("服务已启动", "开始监听微信消息...", position=InfoBarPosition.TOP, parent=self)
         logging.info("服务启动完成")
+        
+        # 更新托盘菜单
+        if hasattr(self, 'tray_menu'):
+            self.update_service_menu()
 
     def stop_service(self):
         import logging
@@ -864,6 +864,10 @@ class Interface(QWidget):
         logging.info("服务已停止")
         InfoBar.warning("服务已停止", "监听已关闭", position=InfoBarPosition.TOP, parent=self)
         self.update_status("stopped")
+        
+        # 更新托盘菜单
+        if hasattr(self, 'tray_menu'):
+            self.update_service_menu()
 
     def update_log(self, msg):
         self.log_text.append(msg)
@@ -950,39 +954,86 @@ class MainWindow(FluentWidget):
     
     def _init_system_tray(self, icon_path):
         """初始化系统托盘图标和菜单"""
+        from qfluentwidgets import RoundMenu, Action, FluentIcon
+        
         # 创建系统托盘图标
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon(icon_path))
         self.tray_icon.setToolTip("微信消息通知助手")
         
-        # 创建托盘菜单
-        tray_menu = QMenu()
+        # 保存图标路径供后续使用
+        self.tray_icon_path = icon_path
+        
+        # 创建托盘菜单（使用 RoundMenu）
+        # RoundMenu 默认会在点击选项或失去焦点时自动关闭
+        self.tray_menu = RoundMenu(parent=self)
         
         # 显示主窗口动作
-        self.show_action = QAction("显示主窗口", self)
-        self.show_action.triggered.connect(self.show_window)
-        tray_menu.addAction(self.show_action)
+        self.tray_menu.addAction(Action(FluentIcon.VIEW, '显示主窗口', triggered=self.show_window))
         
-        # 启动/停止服务动作
-        self.toggle_service_action = QAction("启动服务", self)
-        self.toggle_service_action.triggered.connect(self.toggle_service)
-        tray_menu.addAction(self.toggle_service_action)
+        # 添加分割线
+        self.tray_menu.addSeparator()
         
-        tray_menu.addSeparator()
+        # 启动/停止服务动作（动态更新）
+        self.update_service_menu()
+        
+        # 添加分割线
+        self.tray_menu.addSeparator()
         
         # 退出动作
-        exit_action = QAction("退出", self)
-        exit_action.triggered.connect(self.quit_app)
-        tray_menu.addAction(exit_action)
+        self.tray_menu.addAction(Action(FluentIcon.CLOSE, '退出', triggered=self.quit_app))
         
         # 设置托盘菜单
-        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.setContextMenu(self.tray_menu)
         
         # 连接双击信号
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
         
         # 显示托盘图标
         self.tray_icon.show()
+    
+    def update_service_menu(self):
+        """根据服务状态更新菜单"""
+        from qfluentwidgets import Action, FluentIcon
+        
+        # 清除旧的服务相关动作
+        for action in self.tray_menu.actions():
+            if action.text() in ['启动服务', '停止服务']:
+                self.tray_menu.removeAction(action)
+        
+        # 根据服务状态添加对应的动作
+        is_running = self.interface.worker and self.interface.worker.running
+        
+        if is_running:
+            # 服务运行中，显示"停止服务"
+            stop_action = Action(FluentIcon.CANCEL, '停止服务', triggered=self.stop_service_from_menu)
+            # 在服务动作前插入（在分割线之后）
+            actions = self.tray_menu.actions()
+            for i, action in enumerate(actions):
+                if action.isSeparator() and i > 0:
+                    self.tray_menu.insertAction(actions[i], stop_action)
+                    break
+        else:
+            # 服务未运行，显示"启动服务"
+            start_action = Action(FluentIcon.PLAY, '启动服务', triggered=self.start_service_from_menu)
+            # 在服务动作前插入（在分割线之后）
+            actions = self.tray_menu.actions()
+            for i, action in enumerate(actions):
+                if action.isSeparator() and i > 0:
+                    self.tray_menu.insertAction(actions[i], start_action)
+                    break
+    
+    def start_service_from_menu(self):
+        """从菜单启动服务"""
+        self.interface.start_service()
+        # 更新菜单
+        self.update_service_menu()
+    
+    def stop_service_from_menu(self):
+        """从菜单停止服务"""
+        self.interface.stop_service()
+        # 更新菜单
+        self.update_service_menu()
     
     def on_tray_icon_activated(self, reason):
         """托盘图标被激活时的处理"""
@@ -994,13 +1045,6 @@ class MainWindow(FluentWidget):
         self.showNormal()
         self.activateWindow()
         self.raise_()
-    
-    def toggle_service(self):
-        """切换服务状态"""
-        if self.interface.worker and self.interface.worker.running:
-            self.interface.stop_service()
-        else:
-            self.interface.start_service()
     
     def quit_app(self):
         """退出应用"""
