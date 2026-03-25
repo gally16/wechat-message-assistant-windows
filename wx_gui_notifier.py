@@ -454,6 +454,7 @@ class WeChatMonitorWorker(QObject):
         poll_count = 0
         last_log_time = time.time()
         
+        self.log("开始轮询循环...")
         while self.running:
             time.sleep(poll_interval)
             poll_count += 1
@@ -467,16 +468,37 @@ class WeChatMonitorWorker(QObject):
                     continue
                 
                 # 文件有变化，立即解密 + 推送（参考 monitor_web.py，零延迟）
+                self.log(f"检测到文件变化，开始解密... (第 {poll_count} 次)")
                 t_start = time.time()
                 
                 # 1. 解密主数据库
-                pages, ms = full_decrypt(self.session_db_path, self.session_decrypted_path, enc_key)
+                try:
+                    pages, ms = full_decrypt(self.session_db_path, self.session_decrypted_path, enc_key)
+                    self.log(f"解密完成：{pages}页，{ms:.1f}ms")
+                except Exception as decrypt_err:
+                    self.log(f"解密失败：{decrypt_err}")
+                    import traceback
+                    self.log(traceback.format_exc())
+                    continue
                 
                 # 2. patch WAL
-                wal_patched, wal_ms = decrypt_wal_full(wal_path, self.session_decrypted_path, enc_key)
+                try:
+                    wal_patched, wal_ms = decrypt_wal_full(wal_path, self.session_decrypted_path, enc_key)
+                    self.log(f"WAL patch: {wal_patched}页")
+                except Exception as wal_err:
+                    self.log(f"WAL patch 失败：{wal_err}")
+                    import traceback
+                    self.log(traceback.format_exc())
+                    continue
                 
                 # 3. 立即查询并推送
-                self.process_and_push()
+                try:
+                    self.process_and_push()
+                except Exception as push_err:
+                    self.log(f"推送失败：{push_err}")
+                    import traceback
+                    self.log(traceback.format_exc())
+                    # 继续执行，不中断
                 
                 t_end = time.time()
                 
@@ -491,6 +513,8 @@ class WeChatMonitorWorker(QObject):
                 
             except Exception as e:
                 self.log(f"轮询错误：{str(e)}")
+                import traceback
+                self.log(traceback.format_exc())
                 time.sleep(0.1)
         
         self.log(f"轮询结束，共 {poll_count} 次")
@@ -498,10 +522,12 @@ class WeChatMonitorWorker(QObject):
     def process_and_push(self):
         """查询并推送（完全参考 monitor_web.py，零延迟）"""
         if not os.path.exists(self.session_decrypted_path):
+            self.log(f"session 解密文件不存在：{self.session_decrypted_path}")
             return
         
         try:
             # 使用只读模式查询（避免锁冲突）
+            self.log(f"开始查询 session 数据库...")
             conn = sqlite3.connect(f"file:{self.session_decrypted_path}?mode=ro", uri=True)
             cursor = conn.cursor()
             
@@ -513,6 +539,7 @@ class WeChatMonitorWorker(QObject):
             
             rows = cursor.fetchall()
             conn.close()
+            self.log(f"查询到 {len(rows)} 个会话")
             
             # 收集所有新消息
             new_msgs = []
@@ -555,6 +582,7 @@ class WeChatMonitorWorker(QObject):
                 else:
                     notification_text = msg_text
                 
+                self.log(f"准备推送：{display} - {notification_text[:50]}")
                 self.send_notification(display, notification_text, timestamp)
                 new_msgs.append(notification_text)
                 
@@ -566,12 +594,14 @@ class WeChatMonitorWorker(QObject):
             
             if new_msgs:
                 self.log(f"推送 {len(new_msgs)} 条消息")
+            else:
+                self.log("没有新消息")
         
         except sqlite3.DatabaseError as e:
             # 数据库损坏错误，通常是解密过程中微信正在写入
             # 忽略这次查询，等待下一次轮询
             if 'malformed' in str(e):
-                pass  # 静默跳过，不打印日志
+                self.log(f"数据库未就绪：{e}")
             else:
                 self.log(f"数据库错误：{str(e)}")
         except Exception as e:
@@ -786,6 +816,9 @@ class Interface(QWidget):
             self.stop_service()
 
     def start_service(self):
+        import logging
+        logging.info("开始启动服务...")
+        
         config = {
             'temp_dir': self.dir_temp_path,
             'debounce_time': self.debounce_card.value / 1000.0,
@@ -808,17 +841,27 @@ class Interface(QWidget):
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         
+        logging.info("启动工作线程...")
         self.thread.start()
+        logging.info("工作线程已启动")
         InfoBar.success("服务已启动", "开始监听微信消息...", position=InfoBarPosition.TOP, parent=self)
+        logging.info("服务启动完成")
 
     def stop_service(self):
+        import logging
+        logging.info("开始停止服务...")
+        
         if self.worker:
+            logging.info("停止工作线程...")
             self.worker.stop()
             if self.thread and self.thread.isRunning():
+                logging.info("等待线程退出...")
                 self.thread.quit()
                 self.thread.wait(3000)
+                logging.info("线程已退出")
             self.worker = None
             self.thread = None
+        logging.info("服务已停止")
         InfoBar.warning("服务已停止", "监听已关闭", position=InfoBarPosition.TOP, parent=self)
         self.update_status("stopped")
 
@@ -984,19 +1027,79 @@ class MainWindow(FluentWidget):
             self.quit_app()
 
 if __name__ == "__main__":
-    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    # 配置日志记录 - 使用程序所在目录
+    if getattr(sys, 'frozen', False):
+        # 如果是编译后的 exe，使用 exe 所在目录
+        log_dir = os.path.dirname(sys.executable)
+    else:
+        # 如果是源码运行，使用源码所在目录
+        log_dir = os.path.dirname(__file__)
+    
+    log_file = os.path.join(log_dir, 'wx_gui_notifier.log')
+    
+    # 确保日志目录存在
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+    
+    logging.info("=" * 60)
+    logging.info("微信消息通知助手启动")
+    logging.info(f"日志文件：{log_file}")
+    logging.info(f"程序目录：{log_dir}")
+    logging.info(f"是否冻结：{getattr(sys, 'frozen', False)}")
+    logging.info("=" * 60)
+    
+    # 添加全局异常处理器
+    def exception_handler(exc_type, exc_value, exc_tb):
+        logging.critical("未捕获的异常！", exc_info=(exc_type, exc_value, exc_tb))
+        logging.critical(f"异常类型：{exc_type}")
+        logging.critical(f"异常值：{exc_value}")
+        import traceback
+        tb_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logging.critical(f"堆栈跟踪:\n{tb_str}")
+    
+    sys.excepthook = exception_handler
+    
+    # PyQt5 的异常处理
+    class LogHandler(QObject):
+        @pyqtSlot(str)
+        def message_handler(self, msg):
+            logging.error(f"Qt 消息：{msg}")
+    
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
-    app = QApplication(sys.argv)
-    
-    # 设置应用图标
-    icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.ico')
-    app.setWindowIcon(QIcon(icon_path))
-    
-    from qfluentwidgets import Theme, setTheme
-    setTheme(Theme.AUTO)
-    
-    w = MainWindow()
-    w.show()  # 正常显示主窗口
-    sys.exit(app.exec_())
+        app = QApplication(sys.argv)
+        
+        # 设置应用图标
+        icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.ico')
+        app.setWindowIcon(QIcon(icon_path))
+        
+        from qfluentwidgets import Theme, setTheme
+        setTheme(Theme.AUTO)
+        
+        logging.info("初始化主窗口...")
+        w = MainWindow()
+        logging.info("主窗口初始化完成")
+        w.show()  # 正常显示主窗口
+        logging.info("主窗口已显示")
+        
+        logging.info("启动应用事件循环...")
+        exit_code = sys.exit(app.exec_())
+        logging.info(f"应用退出，退出码：{exit_code}")
+        
+    except Exception as e:
+        logging.critical(f"启动过程中发生异常：{e}", exc_info=True)
+        import traceback
+        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        logging.critical(f"堆栈跟踪:\n{tb_str}")
+        raise

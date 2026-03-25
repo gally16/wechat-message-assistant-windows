@@ -29,19 +29,28 @@ def clean():
     
     # 删除 dist 目录
     if os.path.exists(DIST_DIR):
-        shutil.rmtree(DIST_DIR)
-        print(f"✓ 删除 {DIST_DIR}")
+        try:
+            shutil.rmtree(DIST_DIR)
+            print(f"✓ 删除 {DIST_DIR}")
+        except Exception as e:
+            print(f"⚠ 删除 {DIST_DIR} 失败：{e}，尝试忽略...")
     
     # 删除 build 目录
     if os.path.exists(BUILD_DIR):
-        shutil.rmtree(BUILD_DIR)
-        print(f"✓ 删除 {BUILD_DIR}")
+        try:
+            shutil.rmtree(BUILD_DIR)
+            print(f"✓ 删除 {BUILD_DIR}")
+        except Exception as e:
+            print(f"⚠ 删除 {BUILD_DIR} 失败：{e}，尝试忽略...")
     
     # 删除 .spec 文件
     spec_file = os.path.join(PROJECT_ROOT, f'{APP_NAME}.spec')
     if os.path.exists(spec_file):
-        os.remove(spec_file)
-        print(f"✓ 删除 {spec_file}")
+        try:
+            os.remove(spec_file)
+            print(f"✓ 删除 {spec_file}")
+        except Exception as e:
+            print(f"⚠ 删除 {spec_file} 失败：{e}，尝试忽略...")
     
     print()
 
@@ -97,6 +106,8 @@ def build():
         "--hidden-import", "struct",
         "--hidden-import", "watchdog",
         "--hidden-import", "winotify",
+        "--hidden-import", "zstandard",  # 添加 zstandard 支持
+        "--hidden-import", "zstandard.zstd",
         "--noconfirm",  # 覆盖输出目录
         MAIN_SCRIPT
     ]
