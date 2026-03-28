@@ -44,7 +44,7 @@ UsePreviousLanguage=no
 ShowLanguageDialog=auto
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
