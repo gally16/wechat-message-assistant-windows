@@ -3,9 +3,10 @@
 
 #define MyAppName "WxGuiNotifier"
 #define MyAppVersion "1.0.0"
-#define MyAppPublisher "Your Company"
+#define MyAppPublisher "WeChat Message Assistant"
 #define MyAppExeName "WxGuiNotifier.exe"
-#define MyAppURL "https://github.com/yourusername/WxGuiNotifier"
+#define MyAppURL "https://github.com/TerminatorForMHT/wechat-message-assistant-windows"
+#define MyAppComments "微信消息通知助手 - 帮助您及时获取微信消息通知"
 
 [Setup]
 ; 基本设置
@@ -19,7 +20,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-LicenseFile=
+LicenseFile=LICENSE
 OutputDir=installer_output
 OutputBaseFilename=WxGuiNotifier_Setup_{#MyAppVersion}
 SetupIconFile=src\img\WeChat.ico
@@ -37,9 +38,47 @@ MinVersion=10.0.14393
 ; 用户权限
 PrivilegesRequiredOverridesAllowed=dialog
 
+; 语言设置（中文优先）
+LanguageDetectionMethod=locale
+UsePreviousLanguage=no
+ShowLanguageDialog=auto
+
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "compiler:Default.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[CustomMessages]
+chinesesimplified.RunProgram=启动微信消息通知助手
+chinesesimplified.CreateDesktopIcon=创建桌面快捷方式
+chinesesimplified.CreateQuickLaunchIcon=创建快速启动栏快捷方式
+chinesesimplified.AdditionalIcons=快捷方式
+chinesesimplified.SetupAppTitle=WxGuiNotifier 安装程序
+chinesesimplified.SelectInstallDir=选择安装目录
+chinesesimplified.SelectStartMenuFolder=选择开始菜单文件夹
+chinesesimplified.PreparingToInstall=正在安装，请稍候...
+chinesesimplified.Installing=正在安装...
+chinesesimplified.InstallCompleted=安装完成
+chinesesimplified.ClickFinish=点击"完成"以启动程序
+chinesesimplified.SetupNeedsRestart=安装程序需要重新启动计算机。是否现在重启？
+chinesesimplified.FinishHeading=安装完成
+chinesesimplified.RunThisProgram=运行微信消息通知助手
+chinesesimplified.LaunchProgram=启动程序
+
+english.RunProgram=Launch WeChat Message Assistant
+english.CreateDesktopIcon=Create a desktop icon
+english.CreateQuickLaunchIcon=Create a Quick Launch icon
+english.AdditionalIcons=Additional icons
+english.SetupAppTitle=WxGuiNotifier Setup
+english.SelectInstallDir=Select Install Location
+english.SelectStartMenuFolder=Select Start Menu Folder
+english.PreparingToInstall=Please wait while Setup prepares the installation...
+english.Installing=Installing...
+english.InstallCompleted=Setup Completed
+english.ClickFinish=Click Finish to launch the program
+english.SetupNeedsRestart=Setup needs to restart the computer. Restart now?
+english.FinishHeading=Setup Completed
+english.RunThisProgram=Launch WeChat Message Assistant
+english.LaunchProgram=Launch Program
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -48,8 +87,8 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 [Files]
 ; 主程序
 Source: "dist\WxGuiNotifier.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "README_使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "打包修复说明.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gui_config.example.json"; DestDir: "{app}"; DestName: "gui_config.example.json"; Flags: ignoreversion
 
 ; 注意：不要包含以下文件（在 [Code] 中动态创建）
 ; Source: "gui_config.json"; DestDir: "{app}"; Flags: dontcopy
@@ -61,7 +100,7 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Fil
 
 [Run]
 ; 启动程序
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // 检查 .NET Framework 版本
