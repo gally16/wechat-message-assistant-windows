@@ -18,8 +18,10 @@ PAGE_SZ = 4096
 def find_keys_file():
     """查找 all_keys.json 文件"""
     possible_paths = [
-        os.path.join(os.path.dirname(__file__), 'all_keys.json'),  # 项目根目录
+        # 优先使用项目根目录（当作为包使用时）
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'all_keys.json'),  # 项目根目录
         os.path.join(os.path.dirname(os.path.dirname(__file__)), 'all_keys.json'),  # 父目录
+        os.path.join(os.path.dirname(__file__), 'all_keys.json'),  # 当前目录
     ]
     
     for path in possible_paths:
@@ -27,7 +29,7 @@ def find_keys_file():
             return path
     
     # 如果都不存在，返回默认路径（项目根目录）
-    return os.path.join(os.path.dirname(__file__), 'all_keys.json')
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'all_keys.json')
 
 keys_file = find_keys_file()
 

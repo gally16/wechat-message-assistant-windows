@@ -365,7 +365,8 @@ def ensure_config_file() -> Tuple[Dict, bool]:
     
     # 检查 keys_file 路径
     if "keys_file" not in config or not os.path.isabs(config["keys_file"]):
-        config["keys_file"] = "wechat-decrypt/all_keys.json"
+        # 使用项目根目录的 all_keys.json
+        config["keys_file"] = os.path.join(os.path.dirname(os.path.dirname(__file__)), "all_keys.json")
         needs_update = True
     
     # 检查其他必要字段
