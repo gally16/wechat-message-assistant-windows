@@ -15,11 +15,24 @@ def extract_keys():
     print()
     
     # 导入配置
-    from .gui_config import load_config
+    from .gui_config import get_gui_config, CONFIG_FILE
+    import json
+    import os
     
-    cfg = load_config()
-    db_dir = cfg.get("db_dir")
-    keys_file = cfg.get("keys_file")
+    # 读取配置文件
+    if not os.path.exists(CONFIG_FILE):
+        print("❌ 配置文件不存在")
+        return False
+    
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取配置文件失败：{e}")
+        return False
+    
+    db_dir = config.get("db_dir")
+    keys_file = config.get("keys_file")
     
     if not db_dir:
         print("❌ 未配置微信数据库目录")

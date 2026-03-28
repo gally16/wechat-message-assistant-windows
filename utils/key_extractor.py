@@ -153,11 +153,28 @@ def extract_keys_windows(db_dir: str, out_file: str):
 def main():
     """命令行入口"""
     # 导入配置
-    from .gui_config import load_config
+    from .gui_config import CONFIG_FILE
+    import json
+    import os
     
-    cfg = load_config()
-    db_dir = cfg["db_dir"]
-    out_file = cfg["keys_file"]
+    # 读取配置文件
+    if not os.path.exists(CONFIG_FILE):
+        print("❌ 配置文件不存在")
+        sys.exit(1)
+    
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取配置文件失败：{e}")
+        sys.exit(1)
+    
+    db_dir = config.get("db_dir")
+    out_file = config.get("keys_file")
+    
+    if not db_dir or not out_file:
+        print("❌ 配置文件中缺少 db_dir 或 keys_file 字段")
+        sys.exit(1)
     
     try:
         extract_keys_windows(db_dir, out_file)
