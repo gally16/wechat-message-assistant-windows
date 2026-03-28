@@ -392,7 +392,14 @@ def ensure_config_file() -> Tuple[Dict, bool]:
         logger.info(f"配置已保存到：{CONFIG_FILE}")
     
     # 将相对路径转为绝对路径
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # 对于打包的程序，使用程序所在目录作为基准
+    if getattr(sys, 'frozen', False):
+        # 打包后的程序，使用程序所在目录
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发环境，使用 utils 目录的父目录
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     for key in ["keys_file", "decrypted_dir", "decoded_image_dir"]:
         if key in config and not os.path.isabs(config[key]):
             config[key] = os.path.join(base_dir, config[key])

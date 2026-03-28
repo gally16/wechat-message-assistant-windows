@@ -138,6 +138,9 @@ end;
 
 // 安装后处理
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  KeysFilePath: String;
+  KeysFile: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -146,6 +149,19 @@ begin
     begin
       CreateDir(ExpandConstant('{userappdata}\WxGuiNotifier'));
       Log('Created config directory');
+    end;
+    
+    // 创建空的 all_keys.json 文件（如果不存在）
+    KeysFilePath := ExpandConstant('{app}\all_keys.json');
+    if not FileExists(KeysFilePath) then
+    begin
+      KeysFile := FileCreate(KeysFilePath);
+      if KeysFile <> -1 then
+      begin
+        FileWrite(KeysFile, '{}', 2);
+        FileClose(KeysFile);
+        Log('Created empty all_keys.json file');
+      end;
     end;
   end;
 end;

@@ -5,7 +5,7 @@ a = Analysis(
     ['C:\\Users\\wangc\\Documents\\code\\python\\WxGuiNotifier\\wx_gui_notifier.py'],
     pathex=[],
     binaries=[],
-    datas=[('src', 'src'), ('core', 'core'), ('utils', 'utils'), ('ui', 'ui')],
+    datas=[('src', 'src'), ('core', 'core'), ('utils', 'utils'), ('ui', 'ui'), ('all_keys.json', '.')],
     hiddenimports=['PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets', 'PyQt5.sip', 'qfluentwidgets', 'Crypto.Cipher.AES', 'cryptography', 'sqlite3', 'json', 'threading', 'datetime', 'collections', 'core.wechat_decrypt_core', 'core.wx_decrypt', 'utils.gui_config', 'utils.auto_extract_keys', 'ui.user_selector', 'watchdog', 'winotify', 'zstandard', 'xmltodict', 'PIL', 'aiofiles', 'yara', 'psutil'],
     hookspath=[],
     hooksconfig={},
