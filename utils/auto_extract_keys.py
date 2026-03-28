@@ -1,12 +1,11 @@
 """
 自动密钥提取工具
 
-从 wechat-decrypt 项目提取密钥并保存到 all_keys.json
+直接从微信进程内存中提取密钥并保存到 all_keys.json
 """
 import os
 import sys
 import json
-import subprocess
 
 def extract_keys():
     """提取微信数据库密钥"""
@@ -15,91 +14,71 @@ def extract_keys():
     print("=" * 70)
     print()
     
-    # 检查 wechat-decrypt 目录
-    wechat_decrypt_dir = None
+    # 导入配置
+    from .gui_config import load_config
     
-    # 尝试查找 wechat-decrypt 目录
-    possible_dirs = [
-        os.path.join(os.path.dirname(__file__), 'wechat-decrypt'),
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), 'wechat-decrypt'),
-    ]
+    cfg = load_config()
+    db_dir = cfg.get("db_dir")
+    keys_file = cfg.get("keys_file")
     
-    for dir_path in possible_dirs:
-        if os.path.exists(dir_path):
-            wechat_decrypt_dir = dir_path
-            break
-    
-    if not wechat_decrypt_dir:
-        print("❌ 未找到 wechat-decrypt 目录")
-        print("请确保 wechat-decrypt 目录存在于项目目录中")
+    if not db_dir:
+        print("❌ 未配置微信数据库目录")
+        print("请先在 gui_config.json 中配置 db_dir 字段")
         return False
     
-    print(f"✓ 找到 wechat-decrypt 目录：{wechat_decrypt_dir}")
+    if not keys_file:
+        print("❌ 未配置密钥文件路径")
+        return False
+    
+    print(f"✓ 数据库目录：{db_dir}")
+    print(f"✓ 密钥文件：{keys_file}")
     print()
     
-    # 查找密钥提取脚本
-    script_path = os.path.join(wechat_decrypt_dir, 'find_all_keys_windows.py')
-    
-    if not os.path.exists(script_path):
-        print("❌ 未找到密钥提取脚本：find_all_keys_windows.py")
-        print("请确保 wechat-decrypt 目录中包含此文件")
+    # 检查数据库目录是否存在
+    if not os.path.exists(db_dir):
+        print(f"❌ 数据库目录不存在：{db_dir}")
+        print("请确保微信已登录并创建了数据库文件")
         return False
     
-    print(f"✓ 找到密钥提取脚本：{script_path}")
+    # 检查微信是否运行
+    import subprocess
+    result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True)
+    if "Weixin.exe" not in result.stdout:
+        print("❌ 微信未运行")
+        print("请先登录微信，然后再运行此工具")
+        return False
+    
+    print("✓ 检测到微信正在运行")
     print()
     
     # 运行密钥提取
-    print("正在运行密钥提取...")
+    print("正在从微信进程内存中提取密钥...")
     print("-" * 70)
     
     try:
-        result = subprocess.run(
-            ['python', script_path],
-            cwd=wechat_decrypt_dir,
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
+        from .key_extractor import extract_keys_windows
+        success = extract_keys_windows(db_dir, keys_file)
         
-        print(result.stdout)
-        
-        if result.returncode != 0:
-            print(f"❌ 密钥提取失败：{result.stderr}")
-            return False
-        
-        # 检查是否生成了 all_keys.json
-        output_file = os.path.join(wechat_decrypt_dir, 'all_keys.json')
-        
-        if os.path.exists(output_file):
+        if success:
             print()
             print("=" * 70)
             print("✓ 密钥提取成功！")
-            print(f"✓ 密钥文件：{output_file}")
+            print(f"✓ 密钥文件：{keys_file}")
             print("=" * 70)
-            
-            # 复制到项目根目录
-            target_file = os.path.join(os.path.dirname(__file__), 'all_keys.json')
-            
-            try:
-                import shutil
-                shutil.copy2(output_file, target_file)
-                print(f"✓ 密钥文件已复制到：{target_file}")
-                print()
-                print("现在可以关闭此窗口并运行主程序")
-                return True
-            except Exception as e:
-                print(f"❌ 复制密钥文件失败：{e}")
-                print(f"请手动将 {output_file} 复制到 {target_file}")
-                return True
+            return True
         else:
-            print("❌ 密钥提取完成，但未找到 all_keys.json 文件")
+            print()
+            print("❌ 密钥提取失败")
             return False
             
-    except subprocess.TimeoutExpired:
-        print("❌ 密钥提取超时")
+    except ImportError as e:
+        print(f"❌ 导入密钥提取模块失败：{e}")
         return False
     except Exception as e:
         print(f"❌ 密钥提取失败：{e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 if __name__ == '__main__':

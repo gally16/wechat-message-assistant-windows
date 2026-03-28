@@ -1291,6 +1291,31 @@ class MainWindow(FluentWidget):
                     duration=5000
                 )
                 logger.warning("密钥文件无效，将尝试自动提取")
+                
+                # 自动提取密钥
+                try:
+                    from utils.auto_extract_keys import extract_keys
+                    logger.info("开始自动提取密钥...")
+                    
+                    # 在线程中执行提取，避免阻塞 UI
+                    import threading
+                    def extract_thread():
+                        try:
+                            success = extract_keys()
+                            if success:
+                                logger.info("密钥提取成功")
+                                # 重新加载配置
+                                self._init_config()
+                            else:
+                                logger.error("密钥提取失败")
+                        except Exception as e:
+                            logger.error(f"密钥提取异常：{e}")
+                    
+                    thread = threading.Thread(target=extract_thread, daemon=True)
+                    thread.start()
+                    
+                except Exception as e:
+                    logger.error(f"无法启动密钥提取：{e}")
             
             # 记录配置信息
             logger.info(f"数据库路径：{self.config.get('db_dir', '未设置')}")
