@@ -163,10 +163,11 @@ def verify_files():
     files_to_check = [
         MAIN_SCRIPT,
         ICON_PATH,
-        PROJECT_ROOT / 'wechat-decrypt',
         PROJECT_ROOT / 'src',
         PROJECT_ROOT / 'gui_config.example.json',
-        PROJECT_ROOT / 'wx_decrypt_core.py',
+        PROJECT_ROOT / 'core',
+        PROJECT_ROOT / 'utils',
+        PROJECT_ROOT / 'ui',
     ]
     
     all_exist = True
@@ -210,8 +211,10 @@ def build():
         "--windowed",  # 不显示控制台
         "--onefile",   # 单个文件
         "--icon", str(ICON_PATH),
-        "--add-data", f"wechat-decrypt{os.pathsep}wechat-decrypt",
         "--add-data", f"src{os.pathsep}src",
+        "--add-data", f"core{os.pathsep}core",
+        "--add-data", f"utils{os.pathsep}utils",
+        "--add-data", f"ui{os.pathsep}ui",
         "--hidden-import", "PyQt5",
         "--hidden-import", "PyQt5.QtCore",
         "--hidden-import", "PyQt5.QtGui",
@@ -225,8 +228,11 @@ def build():
         "--hidden-import", "threading",
         "--hidden-import", "datetime",
         "--hidden-import", "collections",
-        "--hidden-import", "ctypes",
-        "--hidden-import", "struct",
+        "--hidden-import", "core.wechat_decrypt_core",
+        "--hidden-import", "core.wx_decrypt",
+        "--hidden-import", "utils.gui_config",
+        "--hidden-import", "utils.auto_extract_keys",
+        "--hidden-import", "ui.user_selector",
         "--hidden-import", "watchdog",
         "--hidden-import", "winotify",
         "--hidden-import", "zstandard",

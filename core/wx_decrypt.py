@@ -35,8 +35,17 @@ keys_file = find_keys_file()
 def load_keys():
     """加载已提取的密钥"""
     if os.path.exists(keys_file):
-        with open(keys_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(keys_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content:
+                    # 文件为空
+                    return {}
+                return json.loads(content)
+        except json.JSONDecodeError:
+            # JSON 格式错误
+            print(f"[!] 密钥文件格式错误：{keys_file}")
+            return {}
     return {}
 
 # 全局密钥
@@ -119,7 +128,7 @@ def decrypt(key: str, src_path: str, dest_path: str) -> bool:
             dest_path = os.path.join(dest_path, 'decrypted.db')
 
         # 导入本地解密函数
-        from wechat_decrypt_core import decrypt_page
+        from .wechat_decrypt_core import decrypt_page
 
         # 获取相对路径
         gui_config_file = os.path.join(os.path.dirname(__file__), 'gui_config.json')

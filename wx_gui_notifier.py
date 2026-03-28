@@ -4,41 +4,24 @@ import time
 import sqlite3
 import logging
 import threading
-import ctypes
-import struct
 from datetime import datetime
 from collections import deque
 
-# 确保 pkg_resources 可用
-try:
-    import pkg_resources
-except ImportError:
-    # 尝试从 setuptools 中导入
-    try:
-        from setuptools import pkg_resources
-    except ImportError:
-        pass
-
 # 导入 GUI 配置管理模块
-try:
-    from gui_config import ensure_config_file, validate_keys_file, get_gui_config, CONFIG_FILE
-    HAS_GUI_CONFIG = True
-except ImportError as e:
-    print(f"警告：无法导入 gui_config 模块：{e}")
-    HAS_GUI_CONFIG = False
+from utils.gui_config import ensure_config_file, validate_keys_file, get_gui_config, CONFIG_FILE
 
 # PyQt5 & QFluentWidgets
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QSize, pyqtSlot
 from PyQt5.QtGui import QIcon, QFont, QColor
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QSlider, QSpinBox, QLabel, QSystemTrayIcon, QMenu, QAction
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QSystemTrayIcon, QMenu, QAction
 
 from qfluentwidgets import (
     FluentWidget, NavigationItemPosition, MessageBox, 
     SettingCardGroup, PushSettingCard, SwitchSettingCard, 
     InfoBar, InfoBarPosition, 
     ComboBoxSettingCard, TitleLabel, SubtitleLabel,
-    BodyLabel, TextEdit, SettingCard, ConfigItem, qconfig,
-    SpinBox, ProgressBar, SystemThemeListener
+    BodyLabel, TextEdit, SettingCard,
+    SpinBox, ProgressBar
 )
 # 尝试导入 SpinBoxSettingCard，如果失败则使用自定义
 try:
@@ -50,28 +33,20 @@ except ImportError:
 from qfluentwidgets.common.icon import FluentIcon as FIF
 
 # 业务逻辑依赖
+from core.wx_decrypt import get_wx_info, HAS_DECRYPT
+from core.wechat_decrypt_core import full_decrypt, decrypt_wal_full
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# 使用 winotify 实现 Windows 通知
 try:
-    # 使用 wx_decrypt 模块，支持微信 4.x
-    from wx_decrypt import get_wx_info, HAS_DECRYPT
-    
-    # 使用独立的解密核心模块（完全独立，不依赖 wechat-decrypt 目录）
-    from wechat_decrypt_core import full_decrypt, decrypt_wal_full
-    
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler
-    # 使用 winotify 实现 Windows 通知
-    try:
-        from winotify import Notification, audio
-        HAS_WINOTIFY = True
-    except ImportError:
-        HAS_WINOTIFY = False
-        
-    if not HAS_DECRYPT:
-        print("警告：wechat-decrypt 模块不可用，请先运行密钥提取")
-except ImportError as e:
-    print(f"缺少必要的库：{e}")
-    print("请运行：pip install watchdog xmltodict zstandard pycryptodome cryptography pillow yara-python aiofiles")
-    sys.exit(1)
+    from winotify import Notification, audio
+    HAS_WINOTIFY = True
+except ImportError:
+    HAS_WINOTIFY = False
+
+if not HAS_DECRYPT:
+    print("警告：wechat-decrypt 模块不可用，请先运行密钥提取")
 
 # wechat-decrypt 常量（用于快速解密）
 PAGE_SZ = 4096
@@ -355,7 +330,7 @@ class WeChatMonitorWorker(QObject):
                 
                 if nickname:
                     # 更新配置文件
-                    from gui_config import save_config
+                    from utils.gui_config import save_config
                     self.config['nickname'] = nickname
                     save_config(self.config)
                     self.log(f"✓ 已保存用户昵称：{nickname}")
@@ -449,7 +424,7 @@ class WeChatMonitorWorker(QObject):
         
         try:
             # 解密 session.db
-            from wx_decrypt import decrypt as wx_decrypt
+            from core.wx_decrypt import decrypt as wx_decrypt
             session_backup = os.path.join(os.path.dirname(self.db_backup), "session_decrypted.db")
             wx_decrypt(self.key, self.session_db_path, session_backup)
             
@@ -1014,7 +989,7 @@ class Interface(QWidget):
         logging.info("开始启动服务...")
         
         # 先初始化微信环境（GUI 模式）
-        from wx_decrypt import init_wechat_env
+        from core.wx_decrypt import init_wechat_env
         logging.info("初始化微信环境...")
         if not init_wechat_env():
             logging.error("微信环境初始化失败")
@@ -1211,7 +1186,7 @@ class MainWindow(FluentWidget):
         
         try:
             # 扫描所有微信用户
-            from gui_config import scan_all_wechat_dirs
+            from utils.gui_config import scan_all_wechat_dirs
             candidates = scan_all_wechat_dirs()
             
             # 检测是否有多个用户
@@ -1247,7 +1222,7 @@ class MainWindow(FluentWidget):
     
     def _show_user_selector(self, candidates: list):
         """显示用户选择器"""
-        from user_selector import show_user_selector
+        from ui.user_selector import show_user_selector
         
         def on_selected(user_data):
             """用户选择完成"""
@@ -1287,8 +1262,8 @@ class MainWindow(FluentWidget):
     def _load_config_from_candidates(self, user_data: dict = None):
         """从候选用户数据加载配置"""
         try:
-            from gui_config import ensure_config_file, validate_keys_file, save_config
-            from wx_decrypt import set_gui_config
+            from utils.gui_config import ensure_config_file, validate_keys_file, save_config
+            from core.wx_decrypt import set_gui_config
             
             # 确保配置文件存在
             self.config, self.config_is_new = ensure_config_file()
@@ -1378,8 +1353,8 @@ class MainWindow(FluentWidget):
     
     def _on_user_switch_clicked(self):
         """切换用户按钮点击事件"""
-        from gui_config import scan_all_wechat_dirs
-        from user_selector import show_user_selector
+        from utils.gui_config import scan_all_wechat_dirs
+        from ui.user_selector import show_user_selector
         
         candidates = scan_all_wechat_dirs()
         
@@ -1398,7 +1373,7 @@ class MainWindow(FluentWidget):
             logger.info(f"用户切换：{user_data['wxid']}")
             # 更新配置
             self.config['db_dir'] = user_data['path']
-            from gui_config import save_config
+            from utils.gui_config import save_config
             save_config(self.config)
             
             # 刷新界面显示
