@@ -15,7 +15,14 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger("WeChatNotifier")
 
 # 配置文件路径
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_config.json")
+# 对于打包的程序，使用 AppData 目录而不是临时目录
+if getattr(sys, 'frozen', False):
+    # 打包后的程序，使用 AppData\Local\WxGuiNotifier 目录
+    CONFIG_FILE = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'WxGuiNotifier', 'gui_config.json')
+else:
+    # 开发环境，使用 utils 目录
+    CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_config.json")
+
 CONFIG_EXAMPLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_config.example.json")
 
 # 系统检测
@@ -364,9 +371,13 @@ def ensure_config_file() -> Tuple[Dict, bool]:
                     logger.warning("路径可在 微信设置 → 文件管理 中找到")
     
     # 检查 keys_file 路径
-    if "keys_file" not in config or not os.path.isabs(config["keys_file"]):
-        # 使用项目根目录的 all_keys.json
-        config["keys_file"] = os.path.join(os.path.dirname(os.path.dirname(__file__)), "all_keys.json")
+    # 始终使用相对路径，避免打包后路径错误
+    if "keys_file" not in config:
+        config["keys_file"] = "all_keys.json"
+        needs_update = True
+    elif os.path.isabs(config["keys_file"]):
+        # 如果已经是绝对路径，转为相对路径
+        config["keys_file"] = "all_keys.json"
         needs_update = True
     
     # 检查其他必要字段
