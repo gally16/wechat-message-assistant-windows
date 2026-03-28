@@ -46,3 +46,16 @@ wechat-decrypt/__pycache__/
 # 绯荤粺鏂囦欢
 .DS_Store
 Thumbs.db
+
+# 本地配置文件（包含敏感数据）
+gui_config.json
+all_keys.json
+
+# 打包输出
+installer_output/
+*.exe
+*.msi
+
+# 日志文件
+*.log
+
