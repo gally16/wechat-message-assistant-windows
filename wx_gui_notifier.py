@@ -4,6 +4,7 @@ import time
 import sqlite3
 import logging
 import threading
+import ctypes
 from datetime import datetime
 from collections import deque
 
@@ -1115,10 +1116,7 @@ class MainWindow(FluentWidget):
         # 自动跟随系统主题（深色/浅色）
         from qfluentwidgets import Theme, setTheme
         setTheme(Theme.AUTO)
-
-        # 创建主题监听器
-        self.themeListener = SystemThemeListener(self)
-
+        
         # 设置窗口图标和标题
         icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.ico')
         self.setWindowIcon(QIcon(icon_path))
@@ -1158,12 +1156,6 @@ class MainWindow(FluentWidget):
                 duration=5000,
                 parent=self
             )
-
-        # 连接主题变化信号，确保界面能响应系统主题变化
-        qconfig.themeChanged.connect(self.on_theme_changed)
-
-        # 启动主题监听器
-        self.themeListener.start()
         
         # 初始化系统托盘
         self._init_system_tray(icon_path)
@@ -1174,16 +1166,6 @@ class MainWindow(FluentWidget):
     
     def _init_config(self):
         """初始化配置文件"""
-        if not HAS_GUI_CONFIG:
-            logger.warning("GUI 配置模块不可用，使用默认配置")
-            self.config = {
-                'temp_dir': os.path.join(os.getcwd(), "wx_temp_data"),
-                'debounce_time': 1.0,
-                'notify_duration': 5,
-                'enable_notify': True
-            }
-            return
-        
         try:
             # 扫描所有微信用户
             from utils.gui_config import scan_all_wechat_dirs
