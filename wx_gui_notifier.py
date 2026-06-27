@@ -185,7 +185,7 @@ class WeChatMonitorWorker(QObject):
         try:
             info_list = get_wx_info()
             if not info_list:
-                raise Exception("未检测到已登录的微信进程")
+                raise Exception("未检测到已登录的微信进程或密钥配置异常，请查看日志")
             
             self.wx_info = info_list[0]
             self.key = self.wx_info.get('key')
@@ -198,7 +198,9 @@ class WeChatMonitorWorker(QObject):
             self.session_db_path = os.path.join(wx_dir, "session", "session.db")
             
             # 从 all_keys.json 获取 session.db 和 micro.db 的专用密钥
-            keys_file = os.path.join(os.path.dirname(__file__), 'all_keys.json')
+            # 使用 core.wx_decrypt 的统一路径解析（兼容 exe 模式）
+            from core.wx_decrypt import find_keys_file, ALL_KEYS as _ALL_KEYS
+            keys_file = find_keys_file()
             if os.path.exists(keys_file):
                 import json
                 with open(keys_file, 'r', encoding='utf-8') as f:
@@ -216,7 +218,7 @@ class WeChatMonitorWorker(QObject):
                     self.log(f"micro.db 密钥：{self.micro_key[:20]}...")
             else:
                 self.session_key = self.key
-                self.log("未找到 all_keys.json，使用 message.db 的密钥")
+                self.log(f"未找到 all_keys.json（查找路径：{keys_file}），使用 message.db 的密钥")
             
             if not self.key or not self.db_path:
                 raise Exception("获取密钥或路径失败")
@@ -1227,11 +1229,21 @@ class Interface(QWidget):
         logging.info("开始启动服务...")
         
         # 先初始化微信环境（GUI 模式）
-        from core.wx_decrypt import init_wechat_env
+        from core.wx_decrypt import init_wechat_env, keys_file, _get_config_file
         logging.info("初始化微信环境...")
         if not init_wechat_env():
             logging.error("微信环境初始化失败")
-            InfoBar.error("启动失败", "无法初始化微信环境，请检查配置", position=InfoBarPosition.TOP, parent=self)
+            # 给出更具体的错误提示，引导用户排查
+            import os as _os
+            if not _os.path.exists(keys_file):
+                tip = f"未找到密钥文件 all_keys.json\n请将其放到 exe 同目录：\n{_os.path.dirname(keys_file)}"
+            else:
+                tip = ("微信环境初始化失败，常见原因：\n"
+                       "1. 微信未运行或未登录（需微信 4.0+）\n"
+                       "2. 未以管理员身份运行本程序\n"
+                       "3. all_keys.json 与当前微信账号不匹配\n"
+                       f"详见日志：{logging.getLogger().handlers[0].baseFilename if logging.getLogger().handlers else ''}")
+            InfoBar.error("启动失败", tip, position=InfoBarPosition.TOP, parent=self, duration=8000)
             return
         
         config = {
