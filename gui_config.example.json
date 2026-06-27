@@ -1,4 +1,4 @@
-﻿{
+{
     "db_dir":  "D:\\xwechat_files\\your_wxid\\db_storage",
     "keys_file":  "all_keys.json",
     "decrypted_dir":  "wx_decrypted",
@@ -10,6 +10,8 @@
                 "notify_duration_sec":  5,
                 "enable_notify":  true,
                 "minimize_to_tray":  true,
-                "auto_start_service":  false
+                "auto_start_service":  false,
+                "filter_mute":  true,
+                "filter_official_article":  true
             }
 }

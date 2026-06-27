@@ -39,6 +39,9 @@ from core.wechat_decrypt_core import full_decrypt, decrypt_wal_full
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# 头像下载与缓存
+from utils.avatar_cache import AvatarCache
+
 # 使用 winotify 实现 Windows 通知
 try:
     from winotify import Notification, audio
@@ -153,6 +156,26 @@ class WeChatMonitorWorker(QObject):
         
         # 全局缓存的已解密 session.db 路径
         self.session_decrypted_path = os.path.join(self.temp_dir, "session_cache.db")
+
+        # 过滤配置（默认开启，避免免打扰/公众号文章打扰）
+        self.filter_mute = config.get('filter_mute', True)
+        self.filter_official_article = config.get('filter_official_article', True)
+
+        # 默认微信图标路径
+        self.default_icon = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.png')
+
+        # 头像缓存管理器
+        self.avatar_cache = AvatarCache(self.temp_dir, default_icon=self.default_icon)
+
+        # SessionTable 免打扰列名（自省后确定），None 表示该表没有免打扰字段
+        self.session_mute_column = None
+        # contact 表层面的免打扰列名（自省后确定）
+        self.contact_mute_column = None
+        # contact 表层面的免打扰状态：username -> 是否免打扰
+        self.contact_mute_map = {}
+
+        # 公众号用户名前缀
+        self._official_prefix = 'gh_'
 
     def log(self, msg):
         logger.info(msg)
@@ -273,21 +296,68 @@ class WeChatMonitorWorker(QObject):
             else:
                 self.log("⚠️ 未找到 contact 表")
             
-            # 尝试不同的字段组合
-            cursor.execute("SELECT username, nick_name, remark FROM contact WHERE username IS NOT NULL;")
+            # 自省 contact 表结构，识别头像字段与免打扰字段
+            self.avatar_cache.introspect_contact_schema(conn)
+            self.contact_mute_column = self.avatar_cache.mute_column
+            avatar_col = self.avatar_cache.avatar_column
+
+            # 构建查询：基础字段 + 头像字段 + 免打扰字段（如存在）
+            select_cols = ["username", "nick_name", "remark"]
+            if avatar_col and avatar_col not in select_cols:
+                select_cols.append(avatar_col)
+            if self.contact_mute_column and self.contact_mute_column not in select_cols:
+                select_cols.append(self.contact_mute_column)
+
+            select_sql = f"SELECT {', '.join(select_cols)} FROM contact WHERE username IS NOT NULL;"
+            cursor.execute(select_sql)
+
+            avatar_loaded = 0
+            mute_loaded = 0
             for row in cursor.fetchall():
-                uname, nick, remark = row
+                values = dict(zip(select_cols, row))
+                uname = values.get("username")
+                nick = values.get("nick_name")
+                remark = values.get("remark")
                 # 优先使用备注名，其次使用昵称
                 name = remark if remark else nick
                 if name and uname:
                     # 存储 username -> name 的映射
                     self.contact_map[uname] = name
-            
+
+                # 头像 URL
+                if avatar_col and uname:
+                    avatar_url = values.get(avatar_col)
+                    if isinstance(avatar_url, bytes):
+                        try:
+                            avatar_url = avatar_url.decode('utf-8', errors='replace').strip()
+                        except Exception:
+                            avatar_url = None
+                    if avatar_url and avatar_url.startswith(('http://', 'https://')):
+                        self.avatar_cache.set_avatar_url(uname, avatar_url)
+                        avatar_loaded += 1
+
+                # 联系人层面的免打扰状态
+                if self.contact_mute_column and uname:
+                    mute_val = values.get(self.contact_mute_column)
+                    # notification_on 字段：1=开启通知（非免打扰），0=免打扰
+                    # 其它 is_mute 类字段：1=免打扰
+                    if self.contact_mute_column == 'notification_on':
+                        is_muted = (mute_val == 0)
+                    else:
+                        is_muted = (mute_val == 1 or mute_val is True)
+                    self.contact_mute_map[uname] = is_muted
+                    if is_muted:
+                        mute_loaded += 1
+
             # 保存 cursor 用于后续查询
             self.contact_cursor = cursor
             self.contact_conn = conn
             
             self.log(f"✓ 联系人加载完成：{len(self.contact_map)} 个")
+            self.log(f"   头像 URL：{avatar_loaded} 个 | 免打扰联系人：{mute_loaded} 个")
+
+            # 后台预下载前若干个联系人的头像，提升首条消息的显示效果
+            self.avatar_cache.preload_async(list(self.contact_map.keys())[:80])
             
             # 打印前 5 个联系人用于调试
             for i, (uname, name) in enumerate(list(self.contact_map.items())[:5]):
@@ -442,22 +512,48 @@ class WeChatMonitorWorker(QObject):
             # 查询 session 状态
             conn = sqlite3.connect(session_backup)
             cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT username, unread_count, summary, last_timestamp,
-                       last_msg_type, last_msg_sender, last_sender_display_name
-                FROM SessionTable WHERE last_timestamp > 0
-            """)
+
+            # 自省免打扰字段
+            self._detect_session_mute_column(conn)
+            mute_col = self.session_mute_column
+
+            base_cols = ["username", "unread_count", "summary", "last_timestamp",
+                         "last_msg_type", "last_msg_sender", "last_sender_display_name"]
+            select_cols = list(base_cols)
+            if mute_col and mute_col not in select_cols:
+                select_cols.append(mute_col)
+            select_sql = f"SELECT {', '.join(select_cols)} FROM SessionTable WHERE last_timestamp > 0"
+            cursor.execute(select_sql)
             
             total_count = 0
             for row in cursor.fetchall():
-                username, unread, summary, timestamp, msg_type, sender, sender_name = row
+                values = dict(zip(select_cols, row))
+                username = values["username"]
+                summary = values["summary"]
+                timestamp = values["last_timestamp"]
+                msg_type = values["last_msg_type"]
+                sender = values["last_msg_sender"]
+                sender_name = values["last_sender_display_name"]
                 
                 # 检查是否是新消息
                 if username in self.prev_session_state:
                     prev = self.prev_session_state[username]
                     if timestamp <= prev['timestamp']:
                         continue
+
+                # 过滤：免打扰 / 公众号文章
+                is_muted = False
+                if mute_col:
+                    is_muted = self._is_session_muted(values.get(mute_col))
+                if not is_muted and username in self.contact_mute_map:
+                    is_muted = self.contact_mute_map[username]
+                should_skip, reason = self._should_skip(username, msg_type, is_muted)
+                if should_skip:
+                    self.prev_session_state[username] = {
+                        'timestamp': timestamp,
+                        'msg_type': msg_type,
+                    }
+                    continue
                 
                 # 获取聊天显示名称
                 display = self.contact_map.get(username, username)
@@ -491,7 +587,9 @@ class WeChatMonitorWorker(QObject):
                 else:
                     notification_text = msg_text
                 
-                self.send_notification(display, notification_text, timestamp)
+                avatar_path = self.avatar_cache.get_avatar_path(username)
+                self.send_notification(display, notification_text, timestamp,
+                                       icon_path=avatar_path, username=username)
                 total_count += 1
                 
                 # 更新状态
@@ -650,24 +748,85 @@ class WeChatMonitorWorker(QObject):
         
         self.log(f"轮询结束，共 {poll_count} 次")
     
+    def _detect_session_mute_column(self, conn):
+        """自省 SessionTable 结构，识别免打扰列名（仅在首次调用时执行）
+
+        微信 4.x 的 SessionTable 通常含 mute_notification 列：
+            0 = 正常提醒，1 = 消息免打扰
+        不同小版本字段名可能不同，这里依次尝试。
+        """
+        if self.session_mute_column is not None:
+            return
+        candidates = ["mute_notification", "is_mute", "mute", "notification_on", "is_muted"]
+        try:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(SessionTable)")
+            columns = {row[1] for row in cursor.fetchall()}
+            for col in candidates:
+                if col in columns:
+                    self.session_mute_column = col
+                    self.log(f"📌 SessionTable 免打扰字段识别为：{col}")
+                    return
+            self.session_mute_column = ""  # 标记为已检测但无此字段
+            self.log("ℹ️ SessionTable 未发现免打扰字段，将仅依赖联系人层面免打扰状态")
+        except Exception as e:
+            self.log(f"自省 SessionTable 结构失败：{e}")
+            self.session_mute_column = ""
+
+    def _is_session_muted(self, mute_val) -> bool:
+        """根据 SessionTable 免打扰字段值判断是否免打扰"""
+        if self.session_mute_column == "notification_on":
+            # notification_on：1=开启通知（非免打扰），0=免打扰
+            return mute_val == 0
+        # 其它字段：1=免打扰
+        return mute_val == 1 or mute_val is True
+
+    def _is_official_account(self, username: str) -> bool:
+        """判断是否为公众号（用户名以 gh_ 开头）"""
+        return bool(username) and username.startswith(self._official_prefix)
+
+    def _should_skip(self, username, msg_type, is_muted):
+        """根据过滤配置判断是否应跳过该消息的通知"""
+        # 1. 免打扰过滤
+        if self.filter_mute and is_muted:
+            return True, "免打扰"
+        # 2. 公众号文章推送过滤（公众号 + 富媒体/链接消息 msg_type==49）
+        if self.filter_official_article and self._is_official_account(username):
+            # 公众号消息通常是文章推送（msg_type 49），其它类型也一并过滤以减少打扰
+            if msg_type == 49 or msg_type == 1:
+                return True, "公众号"
+        return False, None
+
     def process_and_push(self):
-        """查询并推送（完全参考 monitor_web.py，零延迟）"""
+        """查询并推送（完全参考 monitor_web.py，零延迟）
+
+        相比原版增加：
+        1. 过滤已设置消息免打扰的联系人/群
+        2. 过滤公众号文章推送
+        3. 通知中显示联系人/群头像
+        """
         if not os.path.exists(self.session_decrypted_path):
             self.log(f"session 解密文件不存在：{self.session_decrypted_path}")
             return
         
         try:
             # 使用只读模式查询（避免锁冲突）
-            self.log(f"🔍 开始查询 session 数据库...")
             conn = sqlite3.connect(f"file:{self.session_decrypted_path}?mode=ro", uri=True)
             cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT username, unread_count, summary, last_timestamp,
-                       last_msg_type, last_msg_sender, last_sender_display_name
-                FROM SessionTable WHERE last_timestamp > 0
-            """)
-            
+
+            # 首次自省 SessionTable 免打扰字段
+            self._detect_session_mute_column(conn)
+
+            # 构建查询：如存在免打扰字段则一并查出
+            base_cols = ["username", "unread_count", "summary", "last_timestamp",
+                         "last_msg_type", "last_msg_sender", "last_sender_display_name"]
+            mute_col = self.session_mute_column
+            select_cols = list(base_cols)
+            if mute_col and mute_col not in select_cols:
+                select_cols.append(mute_col)
+
+            select_sql = f"SELECT {', '.join(select_cols)} FROM SessionTable WHERE last_timestamp > 0"
+            cursor.execute(select_sql)
             rows = cursor.fetchall()
             conn.close()
             self.log(f"📊 查询到 {len(rows)} 个会话")
@@ -677,9 +836,18 @@ class WeChatMonitorWorker(QObject):
             check_count = 0
             new_count = 0
             skip_count = 0
+            filter_mute_count = 0
+            filter_official_count = 0
             
             for row in rows:
-                username, unread, summary, timestamp, msg_type, sender, sender_name = row
+                values = dict(zip(select_cols, row))
+                username = values["username"]
+                unread = values["unread_count"]
+                summary = values["summary"]
+                timestamp = values["last_timestamp"]
+                msg_type = values["last_msg_type"]
+                sender = values["last_msg_sender"]
+                sender_name = values["last_sender_display_name"]
                 check_count += 1
                 
                 # 检查是否是新消息
@@ -688,6 +856,29 @@ class WeChatMonitorWorker(QObject):
                     if timestamp <= prev['timestamp']:
                         skip_count += 1
                         continue
+
+                # ---- 过滤：免打扰 / 公众号文章 ----
+                # 优先使用 SessionTable 的免打扰字段，其次使用 contact 表的免打扰状态
+                is_muted = False
+                if mute_col:
+                    is_muted = self._is_session_muted(values.get(mute_col))
+                if not is_muted and username in self.contact_mute_map:
+                    is_muted = self.contact_mute_map[username]
+
+                should_skip, reason = self._should_skip(username, msg_type, is_muted)
+                if should_skip:
+                    if reason == "免打扰":
+                        filter_mute_count += 1
+                        self.log(f"🔕 [免打扰过滤] {username} (msg_type={msg_type})")
+                    else:
+                        filter_official_count += 1
+                        self.log(f"📰 [公众号过滤] {username} (msg_type={msg_type})")
+                    # 仍需更新状态，避免取消免打扰后一次性补推历史消息
+                    self.prev_session_state[username] = {
+                        'timestamp': timestamp,
+                        'msg_type': msg_type,
+                    }
+                    continue
                 
                 # 记录新消息
                 new_count += 1
@@ -731,8 +922,12 @@ class WeChatMonitorWorker(QObject):
                 else:
                     notification_text = msg_text
                 
+                # 获取联系人/群头像路径（命中缓存即时返回，未命中则同步下载）
+                avatar_path = self.avatar_cache.get_avatar_path(username)
+                
                 self.log(f"📤 准备推送：{display} - {notification_text[:50]}")
-                self.send_notification(display, notification_text, timestamp)
+                self.send_notification(display, notification_text, timestamp,
+                                       icon_path=avatar_path, username=username)
                 new_msgs.append(notification_text)
                 
                 # 更新状态
@@ -741,7 +936,8 @@ class WeChatMonitorWorker(QObject):
                     'msg_type': msg_type,
                 }
             
-            self.log(f"📈 检查会话：{check_count}个，新消息：{new_count}个，跳过：{skip_count}个")
+            self.log(f"📈 检查会话：{check_count}个，新消息：{new_count}个，跳过：{skip_count}个，"
+                     f"免打扰过滤：{filter_mute_count}个，公众号过滤：{filter_official_count}个")
             
             if new_msgs:
                 self.log(f"🚀 推送 {len(new_msgs)} 条消息")
@@ -793,7 +989,16 @@ class WeChatMonitorWorker(QObject):
             else:
                 return f"[类型{msg_type}]"
     
-    def send_notification(self, sender, content, create_time):
+    def send_notification(self, sender, content, create_time, icon_path=None, username=None):
+        """发送 Windows 通知
+
+        Args:
+            sender: 聊天显示名称（标题）
+            content: 消息内容
+            create_time: 消息时间戳
+            icon_path: 联系人/群头像本地路径，为空则使用默认微信图标
+            username: 联系人 username（用于调试日志）
+        """
         if not self.config.get('enable_notify', True):
             return
             
@@ -801,20 +1006,23 @@ class WeChatMonitorWorker(QObject):
         title = f"{sender}"
         msg = f"{content[:50]}..." if len(content) > 50 else f"{content}"
         
+        # 确定通知图标：优先使用联系人/群头像，失败则回退到默认微信图标
+        final_icon = icon_path
+        if not final_icon or not os.path.exists(final_icon):
+            final_icon = self.default_icon
+        
         # 使用 winotify 发送 Windows 10/11 通知
         if HAS_WINOTIFY:
             try:
-                # 获取图标路径（相对于项目根目录）
-                icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.png')
-                
                 toast = Notification(
                     app_id="微信消息",
                     title=title,
                     msg=msg,
-                    icon=icon_path
+                    icon=final_icon
                 )
                 toast.show()
-                self.log(f"winotify 通知已发送：{title} - {msg}")
+                icon_desc = "自定义头像" if (icon_path and os.path.exists(icon_path)) else "默认图标"
+                self.log(f"winotify 通知已发送（{icon_desc}）：{title} - {msg}")
             except Exception as e:
                 self.log(f"winotify 通知发送失败：{str(e)}")
                 import traceback
@@ -898,6 +1106,8 @@ class Interface(QWidget):
         
         debounce_default = gui_config.get('debounce_time_ms', 1000)
         notify_duration_default = gui_config.get('notify_duration_sec', 5)
+        filter_mute_default = gui_config.get('filter_mute', True)
+        filter_official_default = gui_config.get('filter_official_article', True)
         
         # 1. 启动/停止
         self.switch_card = SwitchSettingCard(
@@ -936,6 +1146,33 @@ class Interface(QWidget):
             "Windows 通知显示的持续时间"
         )
         self.setting_group.addSettingCard(self.duration_card)
+        
+        # 5. 过滤免打扰消息
+        # 图标做回退保护，避免某些 qfluentwidgets 版本缺少对应枚举导致启动崩溃
+        try:
+            mute_icon = FIF.MUTE
+        except AttributeError:
+            mute_icon = FIF.CANCEL
+        self.filter_mute_card = SwitchSettingCard(
+            mute_icon,
+            "过滤消息免打扰",
+            "已设置消息免打扰的联系人/群不再弹窗提醒"
+        )
+        self.filter_mute_card.setChecked(filter_mute_default)
+        self.setting_group.addSettingCard(self.filter_mute_card)
+        
+        # 6. 过滤公众号文章推送
+        try:
+            official_icon = FIF.MESSAGE
+        except AttributeError:
+            official_icon = FIF.INFO
+        self.filter_official_card = SwitchSettingCard(
+            official_icon,
+            "过滤公众号文章推送",
+            "公众号发布的文章/消息不再弹窗提醒"
+        )
+        self.filter_official_card.setChecked(filter_official_default)
+        self.setting_group.addSettingCard(self.filter_official_card)
         
         layout.addWidget(self.setting_group)
         
@@ -1001,9 +1238,22 @@ class Interface(QWidget):
             'temp_dir': self.dir_temp_path,
             'debounce_time': self.debounce_card.value / 1000.0,
             'notify_duration': self.duration_card.value,
-            'enable_notify': True
+            'enable_notify': True,
+            'filter_mute': self.filter_mute_card.isChecked(),
+            'filter_official_article': self.filter_official_card.isChecked(),
         }
-        
+
+        # 持久化过滤设置到配置文件，便于下次启动时记忆
+        try:
+            from utils.gui_config import save_config
+            if 'gui' not in self.config:
+                self.config['gui'] = {}
+            self.config['gui']['filter_mute'] = config['filter_mute']
+            self.config['gui']['filter_official_article'] = config['filter_official_article']
+            save_config(self.config)
+        except Exception as e:
+            logging.warning(f"保存过滤设置失败：{e}")
+
         self.worker = WeChatMonitorWorker(config)
         self.thread = QThread()
         self.worker.moveToThread(self.thread)
