@@ -1344,7 +1344,6 @@ class Interface(QWidget):
             "消息防抖动 (ms)", 
             "避免微信连续写入导致重复解密 (推荐 1000ms)"
         )
-        self.setting_group.addSettingCard(self.debounce_card)
         
         # 4. 通知停留时间 (使用自定义 SliderSettingCard)
         self.duration_card = SliderSettingCard(
@@ -1353,7 +1352,6 @@ class Interface(QWidget):
             "通知停留时间 (秒)",
             "Windows 通知显示的持续时间"
         )
-        self.setting_group.addSettingCard(self.duration_card)
         
         # 5. 过滤免打扰消息
         # 图标做回退保护，避免某些 qfluentwidgets 版本缺少对应枚举导致启动崩溃
@@ -1367,7 +1365,6 @@ class Interface(QWidget):
             "已设置消息免打扰的联系人/群不再弹窗提醒"
         )
         self.filter_mute_card.setChecked(filter_mute_default)
-        self.setting_group.addSettingCard(self.filter_mute_card)
         
         # 6. 过滤公众号文章推送
         try:
@@ -1380,7 +1377,6 @@ class Interface(QWidget):
             "公众号发布的文章/消息不再弹窗提醒"
         )
         self.filter_official_card.setChecked(filter_official_default)
-        self.setting_group.addSettingCard(self.filter_official_card)
 
         # 7. 通知声音
         try:
@@ -1394,9 +1390,35 @@ class Interface(QWidget):
         )
         self.sound_card.setChecked(self.enable_notification_sound)
         self.sound_card.checkedChanged.connect(self.on_sound_toggled)
-        self.setting_group.addSettingCard(self.sound_card)
         
         layout.addWidget(self.setting_group)
+
+        # 紧凑配置区：前 2 个一行，下面 3 个一行，避免运行配置纵向过长。
+        compact_config_panel = QWidget(self)
+        compact_config_panel.setObjectName("CompactConfigPanel")
+        compact_config_panel.setStyleSheet(
+            "QWidget#CompactConfigPanel { background: transparent; }"
+        )
+        compact_layout = QVBoxLayout(compact_config_panel)
+        compact_layout.setContentsMargins(0, 0, 0, 0)
+        compact_layout.setSpacing(8)
+
+        metrics_row = QHBoxLayout()
+        metrics_row.setContentsMargins(0, 0, 0, 0)
+        metrics_row.setSpacing(8)
+        metrics_row.addWidget(self.debounce_card, 1)
+        metrics_row.addWidget(self.duration_card, 1)
+
+        filters_row = QHBoxLayout()
+        filters_row.setContentsMargins(0, 0, 0, 0)
+        filters_row.setSpacing(8)
+        filters_row.addWidget(self.filter_mute_card, 1)
+        filters_row.addWidget(self.filter_official_card, 1)
+        filters_row.addWidget(self.sound_card, 1)
+
+        compact_layout.addLayout(metrics_row)
+        compact_layout.addLayout(filters_row)
+        layout.addWidget(compact_config_panel)
 
         # 手动过滤：使用独立面板，不放进 SettingCard，避免列表控件被固定行高压扁。
         manual_title = SubtitleLabel("手动过滤", self)
