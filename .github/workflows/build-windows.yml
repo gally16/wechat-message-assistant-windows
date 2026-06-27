@@ -1,0 +1,81 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master, main ]
+    tags: [ 'v*', 'V*', '*' ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          architecture: 'x64'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install pyinstaller pillow
+
+      - name: Static validation for mute/official/avatar fixes
+        shell: pwsh
+        run: |
+          python scripts/validate_fix_static.py
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          if (Test-Path build.py) {
+            python build.py
+          } elseif (Test-Path WxGuiNotifier.spec) {
+            pyinstaller --clean --noconfirm WxGuiNotifier.spec
+          } else {
+            pyinstaller --clean --noconfirm --windowed --name WxGuiNotifier --icon src/img/WeChat.ico wx_gui_notifier.py --add-data "src;src" --add-data "ui;ui" --add-data "core;core" --add-data "utils;utils" --add-data "gui_config.example.json;." --add-data "version.json;."
+          }
+
+      - name: Smoke check artifact
+        shell: pwsh
+        run: |
+          if (!(Test-Path dist/WxGuiNotifier.exe)) {
+            Write-Host "dist list:"
+            Get-ChildItem -Recurse dist | Format-List FullName,Length
+            throw "WxGuiNotifier.exe not found"
+          }
+          Get-Item dist/WxGuiNotifier.exe | Format-List FullName,Length
+
+      - name: Upload portable EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: WxGuiNotifier-win10-x64
+          path: |
+            dist/WxGuiNotifier.exe
+            gui_config.example.json
+            version.json
+            LICENSE
+          if-no-files-found: error
+
+      - name: Build installer if Inno Setup script exists
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (Test-Path WxGuiNotifier.iss) {
+            choco install innosetup -y
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" WxGuiNotifier.iss
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: WxGuiNotifier-installer
+          path: installer_output/*
+          if-no-files-found: ignore
