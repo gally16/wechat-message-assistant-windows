@@ -139,12 +139,22 @@ def build_exe():
         "--add-data", f"core{os.pathsep}core",
         "--add-data", f"utils{os.pathsep}utils",
         "--add-data", f"ui{os.pathsep}ui",
+        "--add-data", f"gui_config.example.json{os.pathsep}.",
+        "--add-data", f"version.json{os.pathsep}.",
+    ]
+    # 动态追加 all_keys.json
+    all_keys_file = PROJECT_ROOT / 'all_keys.json'
+    if all_keys_file.exists():
+        cmd += ["--add-data", f"all_keys.json{os.pathsep}."]
+
+    cmd += [
         "--hidden-import", "PyQt5",
         "--hidden-import", "PyQt5.QtCore",
         "--hidden-import", "PyQt5.QtGui",
         "--hidden-import", "PyQt5.QtWidgets",
         "--hidden-import", "PyQt5.sip",
         "--hidden-import", "qfluentwidgets",
+        "--collect-all", "qfluentwidgets",
         "--hidden-import", "Crypto.Cipher.AES",
         "--hidden-import", "cryptography",
         "--hidden-import", "sqlite3",
@@ -152,16 +162,25 @@ def build_exe():
         "--hidden-import", "threading",
         "--hidden-import", "datetime",
         "--hidden-import", "collections",
+        "--hidden-import", "urllib.request",
+        "--hidden-import", "urllib.error",
+        "--hidden-import", "io",
         "--hidden-import", "core.wechat_decrypt_core",
         "--hidden-import", "core.wx_decrypt",
         "--hidden-import", "utils.gui_config",
         "--hidden-import", "utils.auto_extract_keys",
+        "--hidden-import", "utils.avatar_cache",
+        "--hidden-import", "utils.key_extractor",
+        "--hidden-import", "utils.key_scan_common",
         "--hidden-import", "ui.user_selector",
         "--hidden-import", "watchdog",
+        "--hidden-import", "watchdog.observers",
+        "--hidden-import", "watchdog.events",
         "--hidden-import", "winotify",
         "--hidden-import", "zstandard",
         "--hidden-import", "xmltodict",
         "--hidden-import", "PIL",
+        "--hidden-import", "PIL.Image",
         "--hidden-import", "aiofiles",
         "--hidden-import", "yara",
         "--hidden-import", "psutil",
