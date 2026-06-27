@@ -59,6 +59,11 @@ _DEFAULT_GUI_CONFIG = {
         # 消息过滤（默认开启，避免免打扰/公众号文章打扰）
         "filter_mute": True,
         "filter_official_article": True,
+        # 数据库字段识别不到免打扰时，可手动填写 username / chatroom。
+        "mute_usernames": [],
+        # Toast 可能被 Windows 策略静音，winsound 会做一次系统声音兜底。
+        "enable_notification_sound": True,
+        "sound_alias": "SystemAsterisk",
     }
 }
 
