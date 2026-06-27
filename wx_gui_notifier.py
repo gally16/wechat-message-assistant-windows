@@ -169,6 +169,8 @@ class WeChatMonitorWorker(QObject):
         self.manual_mute_set = set(config.get('mute_usernames', []) or [])
         self.enable_notification_sound = config.get('enable_notification_sound', True)
         self.sound_alias = config.get('sound_alias', 'SystemAsterisk')
+        self.keys_file = config.get('keys_file')
+        self.all_keys = {}
 
         # 默认微信图标路径
         self.default_icon = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.png')
@@ -191,6 +193,83 @@ class WeChatMonitorWorker(QObject):
             'mphelper',
         }
 
+    def _candidate_keys_files(self):
+        """按优先级查找 all_keys.json，优先使用 GUI 配置里的绝对路径。"""
+        candidates = []
+
+        def add(path):
+            if not path:
+                return
+            if not os.path.isabs(path):
+                bases = [
+                    os.getcwd(),
+                    os.path.dirname(__file__),
+                    os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else '',
+                ]
+                for base in bases:
+                    if base:
+                        candidates.append(os.path.abspath(os.path.join(base, path)))
+            else:
+                candidates.append(os.path.abspath(path))
+
+        add(self.keys_file)
+
+        try:
+            if os.path.exists(CONFIG_FILE):
+                import json
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                add(cfg.get('keys_file'))
+        except Exception:
+            pass
+
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else ''
+        for path in [
+            os.path.join(exe_dir, 'all_keys.json') if exe_dir else '',
+            os.path.join(os.getcwd(), 'all_keys.json'),
+            os.path.join(os.path.dirname(__file__), 'all_keys.json'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'all_keys.json'),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'all_keys.json'),
+        ]:
+            add(path)
+
+        seen = set()
+        unique = []
+        for path in candidates:
+            norm = os.path.normcase(os.path.abspath(path))
+            if norm not in seen:
+                seen.add(norm)
+                unique.append(path)
+        return unique
+
+    def _load_all_keys(self):
+        """加载 all_keys.json；失败时返回空字典，不再误用 message key。"""
+        import json
+        for path in self._candidate_keys_files():
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and data:
+                    self.keys_file = path
+                    self.all_keys = data
+                    self.log(f"已加载 all_keys.json：{path}")
+                    return data
+            except Exception as e:
+                self.log(f"读取 all_keys.json 失败：{path}，{e}")
+        self.all_keys = {}
+        return {}
+
+    @staticmethod
+    def _get_db_key(all_keys, rel_path):
+        """兼容不同路径分隔符，从 all_keys 中取数据库专用密钥。"""
+        target = rel_path.replace('/', '\\').lower()
+        for key, info in (all_keys or {}).items():
+            if key.replace('/', '\\').lower() == target and isinstance(info, dict):
+                return info.get('enc_key')
+        return None
+
     def log(self, msg):
         logger.info(msg)
         self.log_signal.emit(msg)
@@ -211,26 +290,28 @@ class WeChatMonitorWorker(QObject):
             wx_dir = os.path.dirname(os.path.dirname(self.db_path))
             self.session_db_path = os.path.join(wx_dir, "session", "session.db")
             
-            # 从 all_keys.json 获取 session.db 和 micro.db 的专用密钥
-            keys_file = os.path.join(os.path.dirname(__file__), 'all_keys.json')
-            if os.path.exists(keys_file):
-                import json
-                with open(keys_file, 'r', encoding='utf-8') as f:
-                    all_keys = json.load(f)
-                
-                # 获取 session.db 的密钥
-                session_key_info = all_keys.get('session\\session.db', {})
-                self.session_key = session_key_info.get('enc_key', self.key)
-                self.log(f"session.db 密钥：{self.session_key[:20]}...")
-                
-                # 获取 micro.db 的密钥
-                micro_key_info = all_keys.get('contact\\contact.db', {})
-                if micro_key_info.get('enc_key'):
-                    self.micro_key = micro_key_info['enc_key']
-                    self.log(f"micro.db 密钥：{self.micro_key[:20]}...")
-            else:
-                self.session_key = self.key
-                self.log("未找到 all_keys.json，使用 message.db 的密钥")
+            # 从 all_keys.json 获取各数据库专用密钥。不能用 message key 解 contact/session。
+            all_keys = self._load_all_keys()
+            if not all_keys:
+                checked = "\n".join(f"  - {p}" for p in self._candidate_keys_files())
+                raise Exception(f"未找到有效 all_keys.json，已检查：\n{checked}")
+
+            message_key = self._get_db_key(all_keys, 'message\\message_0.db')
+            contact_key = self._get_db_key(all_keys, 'contact\\contact.db')
+            session_key = self._get_db_key(all_keys, 'session\\session.db')
+
+            if message_key:
+                self.key = message_key
+            if not contact_key:
+                raise Exception("all_keys.json 缺少 contact\\contact.db 的 enc_key，无法加载联系人")
+            if not session_key:
+                raise Exception("all_keys.json 缺少 session\\session.db 的 enc_key，无法监听会话")
+
+            self.micro_key = contact_key
+            self.session_key = session_key
+            self.log(f"message_0.db 密钥：{self.key[:20]}...")
+            self.log(f"contact.db 密钥：{self.micro_key[:20]}...")
+            self.log(f"session.db 密钥：{self.session_key[:20]}...")
             
             if not self.key or not self.db_path:
                 raise Exception("获取密钥或路径失败")
@@ -826,10 +907,16 @@ class WeChatMonitorWorker(QObject):
 
         return False
 
+    def _is_manually_muted(self, username=None, sender=None, display_name=None) -> bool:
+        """手动过滤支持 username、群名/昵称、发送者显示名。"""
+        manual = {str(v).strip().lower() for v in self.manual_mute_set if str(v).strip()}
+        values = [(v or "").strip().lower() for v in (username, sender, display_name)]
+        return any(v in manual for v in values if v)
+
     def _should_skip(self, username, msg_type, is_muted, sender=None, display_name=None):
         """根据过滤配置判断是否应跳过该消息的通知"""
         # 0. 用户手动配置的联系人/群始终过滤，不依赖数据库免打扰字段。
-        if username in self.manual_mute_set:
+        if self._is_manually_muted(username, sender, display_name):
             return True, "手动过滤"
 
         # 1. 免打扰过滤
@@ -1311,28 +1398,31 @@ class Interface(QWidget):
         
         layout.addWidget(self.setting_group)
 
-        # 手动过滤：数据库字段识别不到免打扰时，由用户明确指定不弹窗的联系人/群。
-        self.manual_filter_group = SettingCardGroup("手动过滤", self)
-        manual_card = SettingCard(
-            mute_icon,
-            "手动过滤联系人/群",
-            "可从已加载联系人或已弹窗提醒记录中搜索添加；命中后不再弹窗"
-        )
-        manual_card.layout().setContentsMargins(16, 14, 16, 14)
+        # 手动过滤：使用独立面板，不放进 SettingCard，避免列表控件被固定行高压扁。
+        manual_title = SubtitleLabel("手动过滤", self)
+        layout.addWidget(manual_title)
 
-        manual_panel = QWidget(manual_card)
+        manual_panel = QWidget(self)
+        manual_panel.setMinimumHeight(360)
+        manual_panel.setObjectName("ManualFilterPanel")
         manual_panel.setStyleSheet(
-            "QLineEdit { padding: 7px 10px; border: 1px solid #D0D7DE; "
+            "QWidget#ManualFilterPanel { background: rgba(255,255,255,0.96); "
+            "border: 1px solid #DDE3EA; border-radius: 12px; }"
+            "QLineEdit { padding: 8px 10px; border: 1px solid #D0D7DE; "
             "border-radius: 8px; background: #FFFFFF; }"
             "QListWidget { border: 1px solid #D0D7DE; border-radius: 8px; "
             "background: #FFFFFF; padding: 4px; }"
-            "QPushButton { padding: 7px 12px; border-radius: 8px; "
+            "QPushButton { padding: 8px 12px; border-radius: 8px; "
             "background: #E8F3FF; border: 1px solid #B8D8FF; }"
             "QPushButton:hover { background: #D8EAFF; }"
         )
         manual_layout = QVBoxLayout(manual_panel)
-        manual_layout.setContentsMargins(0, 0, 0, 0)
-        manual_layout.setSpacing(8)
+        manual_layout.setContentsMargins(18, 16, 18, 16)
+        manual_layout.setSpacing(10)
+
+        manual_header = BodyLabel("手动过滤联系人/群：命中后不再弹窗。可从联系人或已弹窗提醒记录中搜索添加。", self)
+        manual_header.setTextColor(QColor(60, 60, 60), QColor(220, 220, 220))
+        manual_layout.addWidget(manual_header)
 
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
@@ -1345,19 +1435,28 @@ class Interface(QWidget):
         search_row.addWidget(self.add_mute_btn)
         manual_layout.addLayout(search_row)
 
-        self.contact_candidate_list = QListWidget(self)
-        self.contact_candidate_list.setMaximumHeight(130)
-        self.contact_candidate_list.itemDoubleClicked.connect(lambda _item: self.add_selected_mute_contact())
-        manual_layout.addWidget(self.contact_candidate_list)
+        lists_row = QHBoxLayout()
+        lists_row.setSpacing(12)
 
-        manual_tip = BodyLabel("候选来源：已加载联系人映射 + 已弹窗提醒记录。双击候选可快速添加。", self)
-        manual_tip.setTextColor(QColor(96, 96, 96), QColor(180, 180, 180))
-        manual_layout.addWidget(manual_tip)
+        candidate_box = QVBoxLayout()
+        candidate_box.setSpacing(6)
+        candidate_label = BodyLabel("可添加候选（已加载联系人 / 已弹窗提醒）", self)
+        candidate_box.addWidget(candidate_label)
+        self.contact_candidate_list = QListWidget(self)
+        self.contact_candidate_list.setMinimumHeight(190)
+        self.contact_candidate_list.itemDoubleClicked.connect(lambda _item: self.add_selected_mute_contact())
+        candidate_box.addWidget(self.contact_candidate_list)
+        lists_row.addLayout(candidate_box, 1)
+
+        current_box = QVBoxLayout()
+        current_box.setSpacing(6)
+        current_label = BodyLabel("当前过滤列表", self)
+        current_box.addWidget(current_label)
 
         current_row = QHBoxLayout()
         current_row.setSpacing(8)
         self.manual_mute_list = QListWidget(self)
-        self.manual_mute_list.setMaximumHeight(120)
+        self.manual_mute_list.setMinimumHeight(190)
         current_buttons = QVBoxLayout()
         current_buttons.setSpacing(6)
         self.remove_mute_btn = QPushButton("移除选中", self)
@@ -1372,11 +1471,16 @@ class Interface(QWidget):
         current_buttons.addStretch()
         current_row.addWidget(self.manual_mute_list, 1)
         current_row.addLayout(current_buttons)
-        manual_layout.addLayout(current_row)
+        current_box.addLayout(current_row)
+        lists_row.addLayout(current_box, 1)
 
-        manual_card.layout().addWidget(manual_panel, 1)
-        self.manual_filter_group.addSettingCard(manual_card)
-        layout.addWidget(self.manual_filter_group)
+        manual_layout.addLayout(lists_row)
+
+        manual_tip = BodyLabel("提示：优先从候选里添加，这样保存的是真实 username；直接输入群名/昵称也会按显示名匹配。", self)
+        manual_tip.setTextColor(QColor(96, 96, 96), QColor(180, 180, 180))
+        manual_layout.addWidget(manual_tip)
+
+        layout.addWidget(manual_panel)
         self.refresh_mute_list()
         self.refresh_contact_candidates()
         
@@ -1590,6 +1694,7 @@ class Interface(QWidget):
         
         config = {
             'temp_dir': self.dir_temp_path,
+            'keys_file': self.config.get('keys_file'),
             'debounce_time': self.debounce_card.value / 1000.0,
             'notify_duration': self.duration_card.value,
             'enable_notify': True,
@@ -1871,7 +1976,11 @@ class MainWindow(FluentWidget):
                 logger.info(f"配置已更新为：{user_data['path']}")
             
             # 设置 wx_decrypt 模块的 GUI 配置
-            set_gui_config(self.config.get('db_dir', ''), self.config.get('wxid', ''))
+            set_gui_config(
+                self.config.get('db_dir', ''),
+                self.config.get('wxid', ''),
+                self.config.get('keys_file')
+            )
             
             # 验证密钥文件
             keys_file = self.config.get('keys_file', 'all_keys.json')
