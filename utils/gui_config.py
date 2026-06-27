@@ -56,6 +56,9 @@ _DEFAULT_GUI_CONFIG = {
         "enable_notify": True,
         "minimize_to_tray": True,
         "auto_start_service": False,
+        # 消息过滤（默认开启，避免免打扰/公众号文章打扰）
+        "filter_mute": True,
+        "filter_official_article": True,
     }
 }
 
