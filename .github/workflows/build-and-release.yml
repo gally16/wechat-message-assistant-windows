@@ -1,0 +1,150 @@
+name: Build and Auto Release Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master, main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-2022
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          architecture: 'x64'
+
+      - name: Compute next version
+        id: version
+        shell: pwsh
+        run: |
+          chcp 65001
+          python -X utf8 scripts/next_version.py
+          Write-Host "Next version: ${{ steps.version.outputs.version }}"
+          Write-Host "Next tag: ${{ steps.version.outputs.tag }}"
+          Write-Host "Previous tag: ${{ steps.version.outputs.previous_tag }}"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          chcp 65001
+          python -m pip install --upgrade pip setuptools wheel
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install pyinstaller pillow
+
+      - name: Static validation for mute/official/avatar fixes
+        shell: pwsh
+        run: |
+          chcp 65001
+          if (Test-Path scripts/validate_fix_static.py) {
+            python -X utf8 scripts/validate_fix_static.py
+          } else {
+            Write-Host "scripts/validate_fix_static.py not found, skip static validation."
+          }
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          chcp 65001
+          if (Test-Path build.py) {
+            python -X utf8 build.py
+          } elseif (Test-Path WxGuiNotifier.spec) {
+            pyinstaller --clean --noconfirm WxGuiNotifier.spec
+          } else {
+            pyinstaller --clean --noconfirm --windowed --name WxGuiNotifier --icon src/img/WeChat.ico wx_gui_notifier.py --add-data "src;src" --add-data "ui;ui" --add-data "core;core" --add-data "utils;utils" --add-data "gui_config.example.json;." --add-data "version.json;."
+          }
+
+      - name: Smoke check artifact
+        shell: pwsh
+        run: |
+          chcp 65001
+          if (!(Test-Path dist/WxGuiNotifier.exe)) {
+            Write-Host "dist list:"
+            Get-ChildItem -Recurse dist | Format-List FullName,Length
+            throw "WxGuiNotifier.exe not found"
+          }
+          Get-Item dist/WxGuiNotifier.exe | Format-List FullName,Length
+
+      - name: Pack portable ZIP
+        shell: pwsh
+        run: |
+          chcp 65001
+          $version = "${{ steps.version.outputs.version }}"
+          $portableDir = "release_portable"
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item "dist/WxGuiNotifier.exe" "$portableDir/WxGuiNotifier.exe" -Force
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$portableDir/LICENSE" -Force }
+          if (Test-Path "README.md") { Copy-Item "README.md" "$portableDir/README.md" -Force }
+          if (Test-Path "gui_config.example.json") { Copy-Item "gui_config.example.json" "$portableDir/gui_config.example.json" -Force }
+          if (Test-Path "version.json") { Copy-Item "version.json" "$portableDir/version.json" -Force }
+          "{}" | Out-File -Encoding utf8 "$portableDir/all_keys.json"
+          Compress-Archive -Path "$portableDir/*" -DestinationPath "WxGuiNotifier-Portable-$version.zip" -Force
+
+      - name: Build installer if Inno Setup script exists
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          chcp 65001
+          if (Test-Path WxGuiNotifier.iss) {
+            choco install innosetup -y
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" WxGuiNotifier.iss
+          }
+
+      - name: Generate release notes
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+        run: |
+          chcp 65001
+          python -X utf8 scripts/generate_release_notes.py
+          Get-Content RELEASE_NOTES.md
+
+      - name: Create and push tag
+        shell: pwsh
+        run: |
+          chcp 65001
+          $tag = "${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a $tag -m "Release $tag"
+          git push origin $tag
+
+      - name: Upload build artifact to Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: WxGuiNotifier-${{ steps.version.outputs.version }}-win10-x64
+          path: |
+            dist/WxGuiNotifier.exe
+            WxGuiNotifier-Portable-${{ steps.version.outputs.version }}.zip
+            installer_output/*
+            RELEASE_NOTES.md
+          if-no-files-found: warn
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: WxGuiNotifier ${{ steps.version.outputs.version }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+          files: |
+            dist/WxGuiNotifier.exe
+            WxGuiNotifier-Portable-${{ steps.version.outputs.version }}.zip
+            installer_output/*
