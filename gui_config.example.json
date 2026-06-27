@@ -12,6 +12,9 @@
                 "minimize_to_tray":  true,
                 "auto_start_service":  false,
                 "filter_mute":  true,
-                "filter_official_article":  true
+                "filter_official_article":  true,
+                "mute_usernames":  [],
+                "enable_notification_sound":  true,
+                "sound_alias":  "SystemAsterisk"
             }
 }

@@ -14,7 +14,11 @@ from utils.gui_config import ensure_config_file, validate_keys_file, get_gui_con
 # PyQt5 & QFluentWidgets
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QSize, pyqtSlot
 from PyQt5.QtGui import QIcon, QFont, QColor
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QSystemTrayIcon, QMenu, QAction
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
+    QSystemTrayIcon, QMenu, QAction, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton
+)
 
 from qfluentwidgets import (
     FluentWidget, NavigationItemPosition, MessageBox, 
@@ -131,6 +135,8 @@ class WeChatMonitorWorker(QObject):
     last_msg_signal = pyqtSignal(str)
     finished = pyqtSignal()
     notify_signal = pyqtSignal(str, str)  # title, message
+    contact_map_signal = pyqtSignal(object)  # {username: display_name}
+    notified_contact_signal = pyqtSignal(str, str)  # username, display_name
 
     def __init__(self, config):
         super().__init__()
@@ -160,6 +166,9 @@ class WeChatMonitorWorker(QObject):
         # 过滤配置（默认开启，避免免打扰/公众号文章打扰）
         self.filter_mute = config.get('filter_mute', True)
         self.filter_official_article = config.get('filter_official_article', True)
+        self.manual_mute_set = set(config.get('mute_usernames', []) or [])
+        self.enable_notification_sound = config.get('enable_notification_sound', True)
+        self.sound_alias = config.get('sound_alias', 'SystemAsterisk')
 
         # 默认微信图标路径
         self.default_icon = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.png')
@@ -174,8 +183,13 @@ class WeChatMonitorWorker(QObject):
         # contact 表层面的免打扰状态：username -> 是否免打扰
         self.contact_mute_map = {}
 
-        # 公众号用户名前缀
+        # 公众号用户名前缀与 PC 聚合会话名
         self._official_prefix = 'gh_'
+        self._official_holders = {
+            'brandsessionholder',
+            'officialaccounts',
+            'mphelper',
+        }
 
     def log(self, msg):
         logger.info(msg)
@@ -185,7 +199,7 @@ class WeChatMonitorWorker(QObject):
         try:
             info_list = get_wx_info()
             if not info_list:
-                raise Exception("未检测到已登录的微信进程或密钥配置异常，请查看日志")
+                raise Exception("未检测到已登录的微信进程")
             
             self.wx_info = info_list[0]
             self.key = self.wx_info.get('key')
@@ -198,9 +212,7 @@ class WeChatMonitorWorker(QObject):
             self.session_db_path = os.path.join(wx_dir, "session", "session.db")
             
             # 从 all_keys.json 获取 session.db 和 micro.db 的专用密钥
-            # 使用 core.wx_decrypt 的统一路径解析（兼容 exe 模式）
-            from core.wx_decrypt import find_keys_file, ALL_KEYS as _ALL_KEYS
-            keys_file = find_keys_file()
+            keys_file = os.path.join(os.path.dirname(__file__), 'all_keys.json')
             if os.path.exists(keys_file):
                 import json
                 with open(keys_file, 'r', encoding='utf-8') as f:
@@ -218,7 +230,7 @@ class WeChatMonitorWorker(QObject):
                     self.log(f"micro.db 密钥：{self.micro_key[:20]}...")
             else:
                 self.session_key = self.key
-                self.log(f"未找到 all_keys.json（查找路径：{keys_file}），使用 message.db 的密钥")
+                self.log("未找到 all_keys.json，使用 message.db 的密钥")
             
             if not self.key or not self.db_path:
                 raise Exception("获取密钥或路径失败")
@@ -341,12 +353,7 @@ class WeChatMonitorWorker(QObject):
                 # 联系人层面的免打扰状态
                 if self.contact_mute_column and uname:
                     mute_val = values.get(self.contact_mute_column)
-                    # notification_on 字段：1=开启通知（非免打扰），0=免打扰
-                    # 其它 is_mute 类字段：1=免打扰
-                    if self.contact_mute_column == 'notification_on':
-                        is_muted = (mute_val == 0)
-                    else:
-                        is_muted = (mute_val == 1 or mute_val is True)
+                    is_muted = self._is_mute_value(self.contact_mute_column, mute_val)
                     self.contact_mute_map[uname] = is_muted
                     if is_muted:
                         mute_loaded += 1
@@ -357,6 +364,7 @@ class WeChatMonitorWorker(QObject):
             
             self.log(f"✓ 联系人加载完成：{len(self.contact_map)} 个")
             self.log(f"   头像 URL：{avatar_loaded} 个 | 免打扰联系人：{mute_loaded} 个")
+            self.contact_map_signal.emit(dict(self.contact_map))
 
             # 后台预下载前若干个联系人的头像，提升首条消息的显示效果
             self.avatar_cache.preload_async(list(self.contact_map.keys())[:80])
@@ -549,7 +557,13 @@ class WeChatMonitorWorker(QObject):
                     is_muted = self._is_session_muted(values.get(mute_col))
                 if not is_muted and username in self.contact_mute_map:
                     is_muted = self.contact_mute_map[username]
-                should_skip, reason = self._should_skip(username, msg_type, is_muted)
+                if not is_muted and username in self.manual_mute_set:
+                    is_muted = True
+                should_skip, reason = self._should_skip(
+                    username, msg_type, is_muted,
+                    sender=sender,
+                    display_name=sender_name or self.contact_map.get(username, username)
+                )
                 if should_skip:
                     self.prev_session_state[username] = {
                         'timestamp': timestamp,
@@ -592,6 +606,7 @@ class WeChatMonitorWorker(QObject):
                 avatar_path = self.avatar_cache.get_avatar_path(username)
                 self.send_notification(display, notification_text, timestamp,
                                        icon_path=avatar_path, username=username)
+                self.notified_contact_signal.emit(username, display)
                 total_count += 1
                 
                 # 更新状态
@@ -759,7 +774,11 @@ class WeChatMonitorWorker(QObject):
         """
         if self.session_mute_column is not None:
             return
-        candidates = ["mute_notification", "is_mute", "mute", "notification_on", "is_muted"]
+        candidates = [
+            "mute_notification", "is_mute", "mute", "notification_on", "is_muted",
+            "notify_status", "notifyflag", "notify_flag", "chatroom_notify",
+            "chatroomnotify", "message_notice",
+        ]
         try:
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(SessionTable)")
@@ -775,27 +794,59 @@ class WeChatMonitorWorker(QObject):
             self.log(f"自省 SessionTable 结构失败：{e}")
             self.session_mute_column = ""
 
+    def _is_mute_value(self, column_name, value) -> bool:
+        """统一判断免打扰字段值，兼容正向/反向语义字段。"""
+        if value is None:
+            return False
+
+        name = (column_name or "").strip().lower()
+        text = str(value).strip().lower()
+        falsy = {"0", "false", "no", "off", "", "none", "null"}
+        truthy = {"1", "true", "yes", "on", "mute", "muted"}
+
+        # 这些字段一般表示“是否开启通知”：0/false/off 才是免打扰。
+        if name in {"notification_on", "message_notice", "notify_status"}:
+            return text in falsy
+
+        return text in truthy
+
     def _is_session_muted(self, mute_val) -> bool:
         """根据 SessionTable 免打扰字段值判断是否免打扰"""
-        if self.session_mute_column == "notification_on":
-            # notification_on：1=开启通知（非免打扰），0=免打扰
-            return mute_val == 0
-        # 其它字段：1=免打扰
-        return mute_val == 1 or mute_val is True
+        return self._is_mute_value(self.session_mute_column, mute_val)
 
-    def _is_official_account(self, username: str) -> bool:
-        """判断是否为公众号（用户名以 gh_ 开头）"""
-        return bool(username) and username.startswith(self._official_prefix)
+    def _is_official_account(self, username=None, sender=None, display_name=None) -> bool:
+        """判断是否为公众号或公众号聚合会话。"""
+        values = [username, sender, display_name]
+        lowered = [(v or "").strip().lower() for v in values]
 
-    def _should_skip(self, username, msg_type, is_muted):
+        if any(v in self._official_holders for v in lowered):
+            return True
+        if any(v.startswith(self._official_prefix) for v in lowered):
+            return True
+
+        return False
+
+    def _should_skip(self, username, msg_type, is_muted, sender=None, display_name=None):
         """根据过滤配置判断是否应跳过该消息的通知"""
+        # 0. 用户手动配置的联系人/群始终过滤，不依赖数据库免打扰字段。
+        if username in self.manual_mute_set:
+            return True, "手动过滤"
+
         # 1. 免打扰过滤
         if self.filter_mute and is_muted:
             return True, "免打扰"
+
+        try:
+            mt = int(msg_type)
+        except Exception:
+            mt = -1
+
         # 2. 公众号文章推送过滤（公众号 + 富媒体/链接消息 msg_type==49）
-        if self.filter_official_article and self._is_official_account(username):
-            # 公众号消息通常是文章推送（msg_type 49），其它类型也一并过滤以减少打扰
-            if msg_type == 49 or msg_type == 1:
+        if self.filter_official_article and self._is_official_account(username, sender, display_name):
+            # brandsessionholder 是微信 PC 的公众号聚合会话，直接过滤。
+            if (username or "").strip().lower() in self._official_holders:
+                return True, "公众号"
+            if mt in (49, 1):
                 return True, "公众号"
         return False, None
 
@@ -840,6 +891,7 @@ class WeChatMonitorWorker(QObject):
             skip_count = 0
             filter_mute_count = 0
             filter_official_count = 0
+            filter_manual_count = 0
             
             for row in rows:
                 values = dict(zip(select_cols, row))
@@ -866,10 +918,19 @@ class WeChatMonitorWorker(QObject):
                     is_muted = self._is_session_muted(values.get(mute_col))
                 if not is_muted and username in self.contact_mute_map:
                     is_muted = self.contact_mute_map[username]
+                if not is_muted and username in self.manual_mute_set:
+                    is_muted = True
 
-                should_skip, reason = self._should_skip(username, msg_type, is_muted)
+                should_skip, reason = self._should_skip(
+                    username, msg_type, is_muted,
+                    sender=sender,
+                    display_name=sender_name or self.contact_map.get(username, username)
+                )
                 if should_skip:
-                    if reason == "免打扰":
+                    if reason == "手动过滤":
+                        filter_manual_count += 1
+                        self.log(f"🚫 [手动过滤] {username} (msg_type={msg_type})")
+                    elif reason == "免打扰":
                         filter_mute_count += 1
                         self.log(f"🔕 [免打扰过滤] {username} (msg_type={msg_type})")
                     else:
@@ -930,6 +991,7 @@ class WeChatMonitorWorker(QObject):
                 self.log(f"📤 准备推送：{display} - {notification_text[:50]}")
                 self.send_notification(display, notification_text, timestamp,
                                        icon_path=avatar_path, username=username)
+                self.notified_contact_signal.emit(username, display)
                 new_msgs.append(notification_text)
                 
                 # 更新状态
@@ -939,7 +1001,8 @@ class WeChatMonitorWorker(QObject):
                 }
             
             self.log(f"📈 检查会话：{check_count}个，新消息：{new_count}个，跳过：{skip_count}个，"
-                     f"免打扰过滤：{filter_mute_count}个，公众号过滤：{filter_official_count}个")
+                     f"手动过滤：{filter_manual_count}个，免打扰过滤：{filter_mute_count}个，"
+                     f"公众号过滤：{filter_official_count}个")
             
             if new_msgs:
                 self.log(f"🚀 推送 {len(new_msgs)} 条消息")
@@ -1022,7 +1085,13 @@ class WeChatMonitorWorker(QObject):
                     msg=msg,
                     icon=final_icon
                 )
+                if self.enable_notification_sound:
+                    try:
+                        toast.set_audio(audio.Default, loop=False)
+                    except Exception as audio_err:
+                        self.log(f"winotify 设置声音失败，将使用系统声音兜底：{audio_err}")
                 toast.show()
+                self._play_notification_sound()
                 icon_desc = "自定义头像" if (icon_path and os.path.exists(icon_path)) else "默认图标"
                 self.log(f"winotify 通知已发送（{icon_desc}）：{title} - {msg}")
             except Exception as e:
@@ -1030,7 +1099,50 @@ class WeChatMonitorWorker(QObject):
                 import traceback
                 self.log(f"错误详情：{traceback.format_exc()}")
         else:
+            self._play_notification_sound()
             self.log(f"通知：{title} - {msg}")
+
+    def _play_notification_sound(self):
+        """使用 winsound 兜底播放系统通知音，避免 Toast 静音。"""
+        if not self.enable_notification_sound:
+            return
+
+        def _worker():
+            try:
+                # MessageBeep 使用系统通知方案；即使 Toast 声音被吞，也通常能触发。
+                try:
+                    ctypes.windll.user32.MessageBeep(0x00000040)  # MB_ICONASTERISK
+                except Exception:
+                    pass
+
+                import winsound
+                aliases = [
+                    self.sound_alias or "SystemAsterisk",
+                    "SystemNotification",
+                    "SystemAsterisk",
+                    "SystemExclamation",
+                    "SystemDefault",
+                ]
+                seen = set()
+                for alias in aliases:
+                    if not alias or alias in seen:
+                        continue
+                    seen.add(alias)
+                    try:
+                        winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
+                        return
+                    except Exception:
+                        continue
+
+                # 最后兜底：短促蜂鸣。某些机器没有蜂鸣设备时会失败，忽略即可。
+                try:
+                    winsound.Beep(880, 120)
+                except Exception:
+                    pass
+            except Exception as e:
+                self.log(f"系统通知声音播放失败：{e}")
+
+        threading.Thread(target=_worker, daemon=True, name="notify-sound").start()
 
     def run(self):
         self.running = True
@@ -1091,6 +1203,8 @@ class Interface(QWidget):
         self.worker = None
         self.thread = None
         self.config = config or {}
+        self.available_contacts = {}
+        self.notified_contacts = {}
         self.init_ui()
 
     def init_ui(self):
@@ -1110,6 +1224,11 @@ class Interface(QWidget):
         notify_duration_default = gui_config.get('notify_duration_sec', 5)
         filter_mute_default = gui_config.get('filter_mute', True)
         filter_official_default = gui_config.get('filter_official_article', True)
+        self.mute_usernames = gui_config.get('mute_usernames', [])
+        if not isinstance(self.mute_usernames, list):
+            self.mute_usernames = []
+        self.enable_notification_sound = gui_config.get('enable_notification_sound', True)
+        self.sound_alias = gui_config.get('sound_alias', 'SystemAsterisk')
         
         # 1. 启动/停止
         self.switch_card = SwitchSettingCard(
@@ -1175,8 +1294,91 @@ class Interface(QWidget):
         )
         self.filter_official_card.setChecked(filter_official_default)
         self.setting_group.addSettingCard(self.filter_official_card)
+
+        # 7. 通知声音
+        try:
+            sound_icon = FIF.VOLUME
+        except AttributeError:
+            sound_icon = FIF.INFO
+        self.sound_card = SwitchSettingCard(
+            sound_icon,
+            "通知声音",
+            "开启后使用 Toast 声音 + Windows 系统声音兜底"
+        )
+        self.sound_card.setChecked(self.enable_notification_sound)
+        self.sound_card.checkedChanged.connect(self.on_sound_toggled)
+        self.setting_group.addSettingCard(self.sound_card)
         
         layout.addWidget(self.setting_group)
+
+        # 手动过滤：数据库字段识别不到免打扰时，由用户明确指定不弹窗的联系人/群。
+        self.manual_filter_group = SettingCardGroup("手动过滤", self)
+        manual_card = SettingCard(
+            mute_icon,
+            "手动过滤联系人/群",
+            "可从已加载联系人或已弹窗提醒记录中搜索添加；命中后不再弹窗"
+        )
+        manual_card.layout().setContentsMargins(16, 14, 16, 14)
+
+        manual_panel = QWidget(manual_card)
+        manual_panel.setStyleSheet(
+            "QLineEdit { padding: 7px 10px; border: 1px solid #D0D7DE; "
+            "border-radius: 8px; background: #FFFFFF; }"
+            "QListWidget { border: 1px solid #D0D7DE; border-radius: 8px; "
+            "background: #FFFFFF; padding: 4px; }"
+            "QPushButton { padding: 7px 12px; border-radius: 8px; "
+            "background: #E8F3FF; border: 1px solid #B8D8FF; }"
+            "QPushButton:hover { background: #D8EAFF; }"
+        )
+        manual_layout = QVBoxLayout(manual_panel)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.setSpacing(8)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self.mute_search_edit = QLineEdit(self)
+        self.mute_search_edit.setPlaceholderText("搜索昵称、群名、username；也可直接粘贴 wxid_xxx 或 xxx@chatroom")
+        self.mute_search_edit.textChanged.connect(self.refresh_contact_candidates)
+        self.add_mute_btn = QPushButton("添加到过滤", self)
+        self.add_mute_btn.clicked.connect(self.add_selected_mute_contact)
+        search_row.addWidget(self.mute_search_edit, 1)
+        search_row.addWidget(self.add_mute_btn)
+        manual_layout.addLayout(search_row)
+
+        self.contact_candidate_list = QListWidget(self)
+        self.contact_candidate_list.setMaximumHeight(130)
+        self.contact_candidate_list.itemDoubleClicked.connect(lambda _item: self.add_selected_mute_contact())
+        manual_layout.addWidget(self.contact_candidate_list)
+
+        manual_tip = BodyLabel("候选来源：已加载联系人映射 + 已弹窗提醒记录。双击候选可快速添加。", self)
+        manual_tip.setTextColor(QColor(96, 96, 96), QColor(180, 180, 180))
+        manual_layout.addWidget(manual_tip)
+
+        current_row = QHBoxLayout()
+        current_row.setSpacing(8)
+        self.manual_mute_list = QListWidget(self)
+        self.manual_mute_list.setMaximumHeight(120)
+        current_buttons = QVBoxLayout()
+        current_buttons.setSpacing(6)
+        self.remove_mute_btn = QPushButton("移除选中", self)
+        self.remove_mute_btn.clicked.connect(self.remove_selected_mute_contact)
+        self.clear_mute_btn = QPushButton("清空列表", self)
+        self.clear_mute_btn.clicked.connect(self.clear_manual_mute_contacts)
+        self.save_mute_btn = QPushButton("保存配置", self)
+        self.save_mute_btn.clicked.connect(lambda: self.save_manual_mute_settings(show_tip=True))
+        current_buttons.addWidget(self.remove_mute_btn)
+        current_buttons.addWidget(self.clear_mute_btn)
+        current_buttons.addWidget(self.save_mute_btn)
+        current_buttons.addStretch()
+        current_row.addWidget(self.manual_mute_list, 1)
+        current_row.addLayout(current_buttons)
+        manual_layout.addLayout(current_row)
+
+        manual_card.layout().addWidget(manual_panel, 1)
+        self.manual_filter_group.addSettingCard(manual_card)
+        layout.addWidget(self.manual_filter_group)
+        self.refresh_mute_list()
+        self.refresh_contact_candidates()
         
         # 状态面板
         self.status_group = SettingCardGroup("实时监控", self)
@@ -1205,6 +1407,10 @@ class Interface(QWidget):
         self.log_text.setMinimumHeight(200)
         self.log_text.setMaximumHeight(500)
         self.log_text.setFont(QFont("Consolas", 9))
+        self.log_text.setStyleSheet(
+            "TextEdit { border-radius: 10px; padding: 8px; "
+            "background: rgba(248, 249, 250, 0.92); }"
+        )
         
         # 设置布局权重，让日志区域可以随窗口大小调整
         layout.addWidget(self.log_text, 1)
@@ -1218,6 +1424,152 @@ class Interface(QWidget):
             self.dir_temp_path = path
             self.dir_card.setContent(path)
 
+    def _contact_display(self, username):
+        return (
+            self.notified_contacts.get(username)
+            or self.available_contacts.get(username)
+            or username
+        )
+
+    def refresh_contact_candidates(self):
+        """刷新手动过滤候选列表。"""
+        if not hasattr(self, 'contact_candidate_list'):
+            return
+
+        query = self.mute_search_edit.text().strip().lower() if hasattr(self, 'mute_search_edit') else ""
+        self.contact_candidate_list.clear()
+
+        merged = {}
+        sources = {}
+        for username, name in self.available_contacts.items():
+            merged[username] = name or username
+            sources[username] = "联系人"
+        for username, name in self.notified_contacts.items():
+            merged[username] = name or username
+            sources[username] = "已提醒"
+
+        def _match(item):
+            username, name = item
+            haystack = f"{username} {name}".lower()
+            return not query or query in haystack
+
+        rows = sorted(
+            [item for item in merged.items() if _match(item)],
+            key=lambda kv: (0 if sources.get(kv[0]) == "已提醒" else 1, kv[1], kv[0])
+        )
+
+        for username, name in rows[:80]:
+            if username in self.mute_usernames:
+                continue
+            item = QListWidgetItem(f"[{sources.get(username, '联系人')}] {name}    <{username}>")
+            item.setData(Qt.UserRole, username)
+            self.contact_candidate_list.addItem(item)
+
+        # 没有匹配项时允许用户直接添加输入的 username。
+        if query and self.contact_candidate_list.count() == 0:
+            raw = self.mute_search_edit.text().strip()
+            item = QListWidgetItem(f"[手动输入] {raw}")
+            item.setData(Qt.UserRole, raw)
+            self.contact_candidate_list.addItem(item)
+
+    def refresh_mute_list(self):
+        """刷新当前手动过滤列表。"""
+        if not hasattr(self, 'manual_mute_list'):
+            return
+
+        self.manual_mute_list.clear()
+        for username in sorted(set(self.mute_usernames)):
+            name = self._contact_display(username)
+            item = QListWidgetItem(f"{name}    <{username}>")
+            item.setData(Qt.UserRole, username)
+            self.manual_mute_list.addItem(item)
+
+    def add_selected_mute_contact(self):
+        """从候选列表或搜索框添加一个手动过滤对象。"""
+        username = ""
+        item = self.contact_candidate_list.currentItem() if hasattr(self, 'contact_candidate_list') else None
+        if item:
+            username = item.data(Qt.UserRole) or ""
+        if not username and hasattr(self, 'mute_search_edit'):
+            username = self.mute_search_edit.text().strip()
+
+        username = (username or "").strip()
+        if not username:
+            return
+
+        current = set(self.mute_usernames)
+        current.add(username)
+        self.mute_usernames = sorted(current)
+        self.refresh_mute_list()
+        self.refresh_contact_candidates()
+        self.save_manual_mute_settings(show_tip=False)
+
+    def remove_selected_mute_contact(self):
+        item = self.manual_mute_list.currentItem() if hasattr(self, 'manual_mute_list') else None
+        if not item:
+            return
+
+        username = item.data(Qt.UserRole)
+        self.mute_usernames = [u for u in self.mute_usernames if u != username]
+        self.refresh_mute_list()
+        self.refresh_contact_candidates()
+        self.save_manual_mute_settings(show_tip=False)
+
+    def clear_manual_mute_contacts(self):
+        self.mute_usernames = []
+        self.refresh_mute_list()
+        self.refresh_contact_candidates()
+        self.save_manual_mute_settings(show_tip=False)
+
+    def save_manual_mute_settings(self, show_tip=False):
+        """持久化手动过滤列表，并同步到正在运行的 worker。"""
+        try:
+            from utils.gui_config import save_config
+            if 'gui' not in self.config:
+                self.config['gui'] = {}
+            self.config['gui']['mute_usernames'] = list(self.mute_usernames)
+            self.config['gui']['enable_notification_sound'] = (
+                self.sound_card.isChecked() if hasattr(self, 'sound_card') else self.enable_notification_sound
+            )
+            self.config['gui']['sound_alias'] = self.sound_alias
+            save_config(self.config)
+
+            if self.worker:
+                self.worker.manual_mute_set = set(self.mute_usernames)
+                self.worker.enable_notification_sound = self.config['gui']['enable_notification_sound']
+
+            if show_tip:
+                InfoBar.success(
+                    "配置已保存",
+                    f"当前手动过滤 {len(self.mute_usernames)} 个联系人/群",
+                    position=InfoBarPosition.TOP,
+                    parent=self
+                )
+        except Exception as e:
+            logging.warning(f"保存手动过滤配置失败：{e}")
+            if show_tip:
+                InfoBar.error("保存失败", str(e), position=InfoBarPosition.TOP, parent=self)
+
+    def on_sound_toggled(self, checked):
+        self.enable_notification_sound = checked
+        if self.worker:
+            self.worker.enable_notification_sound = checked
+        self.save_manual_mute_settings(show_tip=False)
+
+    def update_contact_candidates(self, contact_map):
+        """接收 worker 已加载的联系人映射。"""
+        if isinstance(contact_map, dict):
+            self.available_contacts.update(contact_map)
+            self.refresh_mute_list()
+            self.refresh_contact_candidates()
+
+    def add_notified_contact_candidate(self, username, display_name):
+        """记录已经弹窗提醒过的联系人/群，供用户快速加入过滤。"""
+        if username:
+            self.notified_contacts[username] = display_name or username
+            self.refresh_mute_list()
+            self.refresh_contact_candidates()
+
     def toggle_service(self, checked):
         if checked:
             self.start_service()
@@ -1229,21 +1581,11 @@ class Interface(QWidget):
         logging.info("开始启动服务...")
         
         # 先初始化微信环境（GUI 模式）
-        from core.wx_decrypt import init_wechat_env, keys_file, _get_config_file
+        from core.wx_decrypt import init_wechat_env
         logging.info("初始化微信环境...")
         if not init_wechat_env():
             logging.error("微信环境初始化失败")
-            # 给出更具体的错误提示，引导用户排查
-            import os as _os
-            if not _os.path.exists(keys_file):
-                tip = f"未找到密钥文件 all_keys.json\n请将其放到 exe 同目录：\n{_os.path.dirname(keys_file)}"
-            else:
-                tip = ("微信环境初始化失败，常见原因：\n"
-                       "1. 微信未运行或未登录（需微信 4.0+）\n"
-                       "2. 未以管理员身份运行本程序\n"
-                       "3. all_keys.json 与当前微信账号不匹配\n"
-                       f"详见日志：{logging.getLogger().handlers[0].baseFilename if logging.getLogger().handlers else ''}")
-            InfoBar.error("启动失败", tip, position=InfoBarPosition.TOP, parent=self, duration=8000)
+            InfoBar.error("启动失败", "无法初始化微信环境，请检查配置", position=InfoBarPosition.TOP, parent=self)
             return
         
         config = {
@@ -1253,6 +1595,9 @@ class Interface(QWidget):
             'enable_notify': True,
             'filter_mute': self.filter_mute_card.isChecked(),
             'filter_official_article': self.filter_official_card.isChecked(),
+            'mute_usernames': self.mute_usernames,
+            'enable_notification_sound': self.sound_card.isChecked(),
+            'sound_alias': self.sound_alias,
         }
 
         # 持久化过滤设置到配置文件，便于下次启动时记忆
@@ -1262,6 +1607,9 @@ class Interface(QWidget):
                 self.config['gui'] = {}
             self.config['gui']['filter_mute'] = config['filter_mute']
             self.config['gui']['filter_official_article'] = config['filter_official_article']
+            self.config['gui']['mute_usernames'] = config['mute_usernames']
+            self.config['gui']['enable_notification_sound'] = config['enable_notification_sound']
+            self.config['gui']['sound_alias'] = config['sound_alias']
             save_config(self.config)
         except Exception as e:
             logging.warning(f"保存过滤设置失败：{e}")
@@ -1272,6 +1620,8 @@ class Interface(QWidget):
         
         self.worker.log_signal.connect(self.update_log)
         self.worker.status_signal.connect(self.update_status)
+        self.worker.contact_map_signal.connect(self.update_contact_candidates)
+        self.worker.notified_contact_signal.connect(self.add_notified_contact_candidate)
         
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self.thread.quit)
