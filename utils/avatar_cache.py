@@ -40,6 +40,12 @@ _MUTE_COLUMNS = [
     "is_mute",
     "is_muted",
     "mute",
+    "notify_status",
+    "notifyflag",
+    "notify_flag",
+    "chatroom_notify",
+    "chatroomnotify",
+    "message_notice",
 ]
 
 # 下载超时（秒）

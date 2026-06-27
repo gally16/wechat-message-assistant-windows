@@ -383,10 +383,6 @@ def ensure_config_file() -> Tuple[Dict, bool]:
     if "keys_file" not in config:
         config["keys_file"] = "all_keys.json"
         needs_update = True
-    elif os.path.isabs(config["keys_file"]):
-        # 如果已经是绝对路径，转为相对路径
-        config["keys_file"] = "all_keys.json"
-        needs_update = True
     
     # 检查其他必要字段
     for key in ["decrypted_dir", "decoded_image_dir"]:
