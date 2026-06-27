@@ -12,7 +12,7 @@
 - Windows 通知声音兜底
 
 ---
-[img]https://free.boltp.com/2026/06/27/6a3fe18151555.webp[/img]
+![QQ截图20260627205551](https://free.boltp.com/2026/06/27/6a3fe18151555.webp)
 
 ## 兼容性
 
