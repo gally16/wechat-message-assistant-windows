@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: windows-2022
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,6 +25,7 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
+          chcp 65001
           python -m pip install --upgrade pip setuptools wheel
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
           pip install pyinstaller pillow
@@ -29,13 +33,15 @@ jobs:
       - name: Static validation for mute/official/avatar fixes
         shell: pwsh
         run: |
-          python scripts/validate_fix_static.py
+          chcp 65001
+          python -X utf8 scripts/validate_fix_static.py
 
       - name: Build EXE
         shell: pwsh
         run: |
+          chcp 65001
           if (Test-Path build.py) {
-            python build.py
+            python -X utf8 build.py
           } elseif (Test-Path WxGuiNotifier.spec) {
             pyinstaller --clean --noconfirm WxGuiNotifier.spec
           } else {
@@ -45,6 +51,7 @@ jobs:
       - name: Smoke check artifact
         shell: pwsh
         run: |
+          chcp 65001
           if (!(Test-Path dist/WxGuiNotifier.exe)) {
             Write-Host "dist list:"
             Get-ChildItem -Recurse dist | Format-List FullName,Length
@@ -67,6 +74,7 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
+          chcp 65001
           if (Test-Path WxGuiNotifier.iss) {
             choco install innosetup -y
             & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" WxGuiNotifier.iss
