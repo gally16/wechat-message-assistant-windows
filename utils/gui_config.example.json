@@ -1,0 +1,20 @@
+{
+    "db_dir":  "D:\\xwechat_files\\your_wxid\\db_storage",
+    "keys_file":  "all_keys.json",
+    "decrypted_dir":  "wx_decrypted",
+    "decoded_image_dir":  "decoded_images",
+    "wechat_process":  "Weixin.exe",
+    "gui":  {
+                "temp_dir":  "wx_temp_data",
+                "debounce_time_ms":  1000,
+                "notify_duration_sec":  5,
+                "enable_notify":  true,
+                "minimize_to_tray":  true,
+                "auto_start_service":  false,
+                "filter_mute":  true,
+                "filter_official_article":  true,
+                "mute_usernames":  [],
+                "enable_notification_sound":  true,
+                "sound_alias":  "SystemAsterisk"
+            }
+}
