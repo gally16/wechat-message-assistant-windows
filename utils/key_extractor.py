@@ -30,26 +30,50 @@ class MBI(ctypes.Structure):
     ]
 
 
-def get_pids():
-    """返回所有 Weixin.exe 进程的 (pid, mem_kb) 列表，按内存降序"""
+def _normalize_process_names(process_names=None):
+    names = process_names or ["Weixin.exe", "WeChat.exe"]
+    seen = set()
+    result = []
+    for name in names:
+        name = (name or "").strip()
+        if name and "." not in os.path.basename(name):
+            name = f"{name}.exe"
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result or ["Weixin.exe"]
+
+
+def get_pids(process_names=None):
+    """返回微信进程的 (pid, mem_kb) 列表，按内存降序。"""
     import subprocess
-    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
-                       capture_output=True, text=True)
+    process_names = _normalize_process_names(process_names)
     pids = []
-    for line in r.stdout.strip().split('\n'):
-        if not line.strip():
-            continue
-        p = line.strip('"').split('","')
-        if len(p) >= 5:
-            pid = int(p[1])
-            mem = int(p[4].replace(',', '').replace(' K', '').strip() or '0')
-            pids.append((pid, mem))
+    seen_pids = set()
+    for process_name in process_names:
+        r = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+        )
+        for line in r.stdout.strip().split('\n'):
+            if not line.strip() or "INFO:" in line:
+                continue
+            p = line.strip('"').split('","')
+            if len(p) >= 5:
+                pid = int(p[1])
+                if pid in seen_pids:
+                    continue
+                mem = int(p[4].replace(',', '').replace(' K', '').strip() or '0')
+                pids.append((pid, mem, process_name))
+                seen_pids.add(pid)
     if not pids:
-        raise RuntimeError("Weixin.exe 未运行")
+        raise RuntimeError(f"未找到微信进程：{', '.join(process_names)}")
     pids.sort(key=lambda x: x[1], reverse=True)
-    for pid, mem in pids:
-        print(f"[+] Weixin.exe PID={pid} ({mem // 1024}MB)")
-    return pids
+    for pid, mem, process_name in pids:
+        print(f"[+] {process_name} PID={pid} ({mem // 1024}MB)")
+    return [(pid, mem) for pid, mem, _process_name in pids]
 
 
 def read_mem(h, addr, sz):
@@ -76,7 +100,7 @@ def enum_regions(h):
     return regs
 
 
-def extract_keys_windows(db_dir: str, out_file: str):
+def extract_keys_windows(db_dir: str, out_file: str, process_names=None):
     """提取微信数据库密钥的主函数
     
     Args:
@@ -95,9 +119,13 @@ def extract_keys_windows(db_dir: str, out_file: str):
         print(f"  salt {salt_hex}: {', '.join(dbs)}")
 
     # 2. 打开所有微信进程
-    pids = get_pids()
+    pids = get_pids(process_names)
 
-    hex_re = re.compile(b"x'([0-9a-fA-F]{64,192})'")
+    hex_patterns = [
+        ("sql x'hex'", re.compile(rb"x'([0-9a-fA-F]{64,512})'")),
+        ("bare hex", re.compile(rb"(?<![0-9a-fA-F])([0-9a-fA-F]{64,512})(?![0-9a-fA-F])")),
+        ("utf16 hex", re.compile(rb"(?<![0-9a-fA-F]\x00)((?:[0-9a-fA-F]\x00){64,512})(?![0-9a-fA-F]\x00)")),
+    ]
     key_map = {}
     remaining_salts = set(salt_to_dbs.keys())
     all_hex_matches = 0
@@ -123,7 +151,7 @@ def extract_keys_windows(db_dir: str, out_file: str):
                     continue
 
                 all_hex_matches += scan_memory_for_keys(
-                    data, hex_re, db_files, salt_to_dbs,
+                    data, hex_patterns, db_files, salt_to_dbs,
                     key_map, remaining_salts, base, pid, print,
                 )
 
@@ -132,7 +160,7 @@ def extract_keys_windows(db_dir: str, out_file: str):
                     progress = scanned_bytes / total_bytes * 100 if total_bytes else 100
                     print(
                         f"  [{progress:.1f}%] {len(key_map)}/{len(salt_to_dbs)} salts matched, "
-                        f"{all_hex_matches} hex patterns, {elapsed:.1f}s"
+                        f"{all_hex_matches} candidate patterns, {elapsed:.1f}s"
                     )
         finally:
             kernel32.CloseHandle(h)
@@ -142,7 +170,7 @@ def extract_keys_windows(db_dir: str, out_file: str):
             break
 
     elapsed = time.time() - t0
-    print(f"\n扫描完成：{elapsed:.1f}s, {len(pids)} 个进程，{all_hex_matches} hex 模式")
+    print(f"\n扫描完成：{elapsed:.1f}s, {len(pids)} 个进程，{all_hex_matches} 个候选模式")
 
     cross_verify_keys(db_files, salt_to_dbs, key_map, print)
     save_results(db_files, salt_to_dbs, key_map, db_dir, out_file, print)
@@ -152,32 +180,24 @@ def extract_keys_windows(db_dir: str, out_file: str):
 
 def main():
     """命令行入口"""
-    # 导入配置
-    from .gui_config import CONFIG_FILE
-    import json
-    import os
-    
-    # 读取配置文件
-    if not os.path.exists(CONFIG_FILE):
-        print("❌ 配置文件不存在")
-        sys.exit(1)
-    
+    from .gui_config import ensure_config_file
+
     try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
+        config, _ = ensure_config_file()
     except Exception as e:
         print(f"❌ 读取配置文件失败：{e}")
         sys.exit(1)
     
     db_dir = config.get("db_dir")
     out_file = config.get("keys_file")
+    process_names = _normalize_process_names([config.get("wechat_process"), "Weixin.exe", "WeChat.exe"])
     
     if not db_dir or not out_file:
         print("❌ 配置文件中缺少 db_dir 或 keys_file 字段")
         sys.exit(1)
     
     try:
-        extract_keys_windows(db_dir, out_file)
+        extract_keys_windows(db_dir, out_file, process_names=process_names)
     except RuntimeError as e:
         print(f"\n[ERROR] {e}")
         sys.exit(1)

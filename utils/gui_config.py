@@ -55,6 +55,8 @@ _DEFAULT_GUI_CONFIG = {
         "notify_duration_sec": 5,
         "enable_notify": True,
         "minimize_to_tray": True,
+        "start_minimized_to_tray": False,
+        "auto_launch_on_boot": False,
         "auto_start_service": False,
         # 消息过滤（默认开启，避免免打扰/公众号文章打扰）
         "filter_mute": True,
