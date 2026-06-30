@@ -3,21 +3,9 @@
 
 直接从微信进程内存中提取密钥并保存到 all_keys.json
 """
+import os
 import sys
-
-
-def _process_candidates(config):
-    configured = config.get("wechat_process") or "Weixin.exe"
-    names = [configured, "Weixin.exe", "WeChat.exe"]
-    seen = set()
-    result = []
-    for name in names:
-        name = (name or "").strip()
-        key = name.lower()
-        if name and key not in seen:
-            seen.add(key)
-            result.append(name)
-    return result
+import json
 
 def extract_keys():
     """提取微信数据库密钥"""
@@ -26,23 +14,25 @@ def extract_keys():
     print("=" * 70)
     print()
     
+    # 导入配置
+    from .gui_config import get_gui_config, CONFIG_FILE
+    import json
     import os
-    from .gui_config import ensure_config_file, CONFIG_FILE
     
-    # 读取并规范化配置。直接读原始 JSON 会让相对 keys_file 写到当前工作目录。
-    try:
-        config, _ = ensure_config_file()
-    except Exception as e:
-        print(f"❌ 读取配置文件失败：{e}")
-        return False
-
+    # 读取配置文件
     if not os.path.exists(CONFIG_FILE):
         print("❌ 配置文件不存在")
         return False
     
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取配置文件失败：{e}")
+        return False
+    
     db_dir = config.get("db_dir")
     keys_file = config.get("keys_file")
-    process_names = _process_candidates(config)
     
     if not db_dir:
         print("❌ 未配置微信数据库目录")
@@ -52,8 +42,6 @@ def extract_keys():
     if not keys_file:
         print("❌ 未配置密钥文件路径")
         return False
-    keys_file = os.path.abspath(keys_file)
-    os.makedirs(os.path.dirname(keys_file), exist_ok=True)
     
     print(f"✓ 数据库目录：{db_dir}")
     print(f"✓ 密钥文件：{keys_file}")
@@ -65,14 +53,12 @@ def extract_keys():
         print("请确保微信已登录并创建了数据库文件")
         return False
     
-    # 检查微信是否运行，兼容不同发行/版本的进程名。
-    from .key_extractor import get_pids
-    try:
-        get_pids(process_names)
-    except Exception as e:
+    # 检查微信是否运行
+    import subprocess
+    result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True)
+    if "Weixin.exe" not in result.stdout:
         print("❌ 微信未运行")
-        print(f"尝试的进程名：{', '.join(process_names)}")
-        print(f"检测错误：{e}")
         print("请先登录微信，然后再运行此工具")
         return False
     
@@ -85,7 +71,7 @@ def extract_keys():
     
     try:
         from .key_extractor import extract_keys_windows
-        success = extract_keys_windows(db_dir, keys_file, process_names=process_names)
+        success = extract_keys_windows(db_dir, keys_file)
         
         if success:
             print()
