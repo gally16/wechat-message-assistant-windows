@@ -12,7 +12,6 @@
 - Windows 通知声音兜底
 
 ---
-![QQ截图20260627205551](https://free.boltp.com/2026/06/27/6a3fe18151555.webp)
 
 ## 兼容性
 
@@ -48,6 +47,12 @@
 - 新消息通过 Windows Toast 弹窗提醒
 - 群聊消息显示群名和发送者
 
+### 联系人 / 群头像
+
+- 从 `contact.db` 读取头像 URL
+- 自动下载并缓存头像
+- 使用 Pillow 裁剪为 96x96 PNG
+- 头像获取失败时回退默认微信图标
 
 ### 免打扰过滤
 
@@ -151,6 +156,9 @@ pip install -r requirements.txt
     "temp_dir": "wx_temp_data",
     "debounce_time_ms": 1000,
     "notify_duration_sec": 5,
+    "minimize_to_tray": true,
+    "start_minimized_to_tray": false,
+    "auto_launch_on_boot": false,
     "filter_mute": true,
     "filter_official_article": true,
     "mute_usernames": [],
@@ -167,6 +175,9 @@ pip install -r requirements.txt
 | `db_dir` | 微信 `db_storage` 目录 |
 | `keys_file` | `all_keys.json` 路径，支持绝对路径 |
 | `temp_dir` | 解密后临时数据库缓存目录 |
+| `minimize_to_tray` | 点击关闭按钮时是否隐藏到系统托盘 |
+| `start_minimized_to_tray` | 程序启动后是否只保留托盘图标 |
+| `auto_launch_on_boot` | 是否写入当前用户 Windows 开机启动项 |
 | `filter_mute` | 是否过滤消息免打扰联系人 / 群 |
 | `filter_official_article` | 是否过滤公众号文章推送 |
 | `mute_usernames` | 手动过滤列表 |
@@ -193,7 +204,7 @@ python wx_gui_notifier.py
 {
   "gui": {
     "mute_usernames": [
-      "18336@chatroom",
+      "18525661336@chatroom",
       "wxid_xxx"
     ]
   }
@@ -291,6 +302,14 @@ pyinstaller WxGuiNotifier.spec --noconfirm --clean
 1. 打开「过滤消息免打扰」
 2. 如果仍不生效，在「手动过滤」中搜索联系人 / 群并添加
 
+### 公众号仍然弹窗
+
+确认「过滤公众号文章推送」已开启。  
+目前已覆盖 `gh_` 公众号和 `brandsessionholder` 聚合会话。
+
+### 弹窗没有头像
+
+头像依赖 `contact.db` 中的头像 URL。若头像下载失败，会回退默认图标。
 
 ### 弹窗没有声音
 
@@ -332,12 +351,10 @@ pyinstaller WxGuiNotifier.spec --noconfirm --clean
 
 ---
 
-## Star History
+## 版本记录
 
-<a href="https://www.star-history.com/?repos=gally16%2FLLM-Jailbreaking-Guide%2Cgally16%2Fwechat-message-assistant-windows&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=gally16/LLM-Jailbreaking-Guide%2Cgally16/wechat-message-assistant-windows&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=gally16/LLM-Jailbreaking-Guide%2Cgally16/wechat-message-assistant-windows&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=gally16/LLM-Jailbreaking-Guide%2Cgally16/wechat-message-assistant-windows&type=date&legend=top-left" />
- </picture>
-</a>
+当前 README 对应测试环境：
+
+- 微信 PC：`4.1.7.33`
+- 系统：Windows 10
+- Windows 11：理论支持，待完整覆盖测试
