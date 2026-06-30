@@ -18,13 +18,17 @@ PAGE_SZ = 4096
 def find_keys_file():
     """查找 all_keys.json 文件"""
     possible_paths = []
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else ''
 
     # 优先读取 GUI 配置里的 keys_file。打包后配置位于 AppData\Local\WxGuiNotifier。
-    config_candidates = [
-        os.path.join(os.environ.get('LOCALAPPDATA', ''), 'WxGuiNotifier', 'gui_config.json'),
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), 'utils', 'gui_config.json'),
-        os.path.join(os.path.dirname(__file__), 'gui_config.json'),
-    ]
+    local_config = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'WxGuiNotifier', 'gui_config.json')
+    source_config = os.path.join(project_root, 'utils', 'gui_config.json')
+    core_config = os.path.join(os.path.dirname(__file__), 'gui_config.json')
+    if getattr(sys, 'frozen', False):
+        config_candidates = [local_config, core_config, source_config]
+    else:
+        config_candidates = [source_config, core_config]
     for cfg_path in config_candidates:
         if not cfg_path or not os.path.exists(cfg_path):
             continue
@@ -33,11 +37,13 @@ def find_keys_file():
                 cfg = json.load(f)
             configured = cfg.get('keys_file')
             if configured:
+                if not os.path.isabs(configured):
+                    base_dir = exe_dir if exe_dir else project_root
+                    configured = os.path.join(base_dir, configured)
                 possible_paths.append(configured)
         except Exception:
             pass
 
-    exe_dir = os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, 'frozen', False) else ''
     if exe_dir:
         possible_paths.append(os.path.join(exe_dir, 'all_keys.json'))
 
@@ -45,8 +51,7 @@ def find_keys_file():
         *possible_paths,
         os.path.join(os.getcwd(), 'all_keys.json'),
         # 优先使用项目根目录（当作为包使用时）
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'all_keys.json'),  # 项目根目录
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), 'all_keys.json'),  # 父目录
+        os.path.join(project_root, 'all_keys.json'),  # 项目根目录
         os.path.join(os.path.dirname(__file__), 'all_keys.json'),  # 当前目录
     ]
     
@@ -63,7 +68,7 @@ def find_keys_file():
             return path
     
     # 如果都不存在，返回默认路径（项目根目录）
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'all_keys.json')
+    return os.path.join(project_root, 'all_keys.json')
 
 keys_file = find_keys_file()
 
@@ -239,43 +244,23 @@ def init_wechat_env():
     """
     global ALL_KEYS, HAS_DECRYPT, keys_file
     import ctypes
-    import subprocess
     
     # 检查密钥文件是否存在，不存在则尝试提取
     if not os.path.exists(keys_file):
         print("[!] 密钥文件不存在，尝试自动提取...")
         print(f"    目标路径：{keys_file}")
-        
-        # 尝试在项目中查找密钥提取脚本
-        possible_scripts = [
-            os.path.join(os.path.dirname(__file__), 'auto_extract_keys.py'),
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), 'auto_extract_keys.py'),
-        ]
-        
-        script_found = False
-        for script in possible_scripts:
-            if os.path.exists(script):
-                print(f"    找到密钥提取脚本：{script}")
-                try:
-                    # 运行密钥提取脚本
-                    result = subprocess.run(
-                        ['python', script],
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
-                    print(result.stdout)
-                    if result.returncode == 0:
-                        print("[+] 密钥提取成功！")
-                        script_found = True
-                        break
-                except Exception as e:
-                    print(f"[-] 密钥提取失败：{e}")
-        
-        if not script_found:
-            print("[-] 未找到密钥提取脚本")
+
+        try:
+            from utils.auto_extract_keys import extract_keys
+            if extract_keys():
+                print("[+] 密钥提取成功！")
+            else:
+                print("[-] 密钥提取失败")
+                return False
+        except Exception as e:
+            print(f"[-] 密钥提取失败：{e}")
             print("[!] 请手动运行密钥提取工具")
-            print("    运行命令：python auto_extract_keys.py")
+            print("    运行命令：python -m utils.auto_extract_keys")
             return False
     
     # 重新加载密钥
@@ -314,11 +299,12 @@ def set_gui_config(db_dir: str, wxid: str, keys_file_path: str = None):
     :param keys_file_path: 密钥文件路径（可选）
     """
     gui_config_file = os.path.join(os.path.dirname(__file__), 'gui_config.json')
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     config = {
         'db_dir': db_dir,
         'wxid': wxid,
-        'keys_file': keys_file_path or os.path.join(os.path.dirname(__file__), 'all_keys.json'),
+        'keys_file': keys_file_path or os.path.join(project_root, 'all_keys.json'),
     }
     
     with open(gui_config_file, 'w', encoding='utf-8') as f:
