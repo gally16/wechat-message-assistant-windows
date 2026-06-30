@@ -10,8 +10,6 @@
                 "notify_duration_sec":  5,
                 "enable_notify":  true,
                 "minimize_to_tray":  true,
-                "start_minimized_to_tray":  false,
-                "auto_launch_on_boot":  false,
                 "auto_start_service":  false,
                 "filter_mute":  true,
                 "filter_official_article":  true,

@@ -5,7 +5,6 @@ import sqlite3
 import logging
 import threading
 import ctypes
-import subprocess
 from datetime import datetime
 from collections import deque
 
@@ -85,67 +84,6 @@ if not logger.handlers:
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(console_handler)
-
-APP_RUN_REG_NAME = "WxGuiNotifier"
-APP_RUN_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
-START_MINIMIZED_ARG = "--minimized-to-tray"
-
-
-def _get_startup_command(start_minimized=False):
-    """返回写入 Windows Run 注册表的启动命令。"""
-    if getattr(sys, 'frozen', False):
-        args = [sys.executable]
-    else:
-        args = [sys.executable, os.path.abspath(__file__)]
-    if start_minimized:
-        args.append(START_MINIMIZED_ARG)
-    return subprocess.list2cmdline(args)
-
-
-def is_auto_launch_on_boot_enabled():
-    """检查当前用户是否已配置本程序开机启动。"""
-    if sys.platform != "win32":
-        return False
-
-    import winreg
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            APP_RUN_REG_PATH,
-            0,
-            winreg.KEY_READ,
-        ) as key:
-            winreg.QueryValueEx(key, APP_RUN_REG_NAME)
-            return True
-    except FileNotFoundError:
-        return False
-
-
-def set_auto_launch_on_boot(enabled, start_minimized=False):
-    """配置当前用户登录 Windows 后自动启动本程序。"""
-    if sys.platform != "win32":
-        raise RuntimeError("开机启动仅支持 Windows")
-
-    import winreg
-    with winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        APP_RUN_REG_PATH,
-        0,
-        winreg.KEY_SET_VALUE,
-    ) as key:
-        if enabled:
-            winreg.SetValueEx(
-                key,
-                APP_RUN_REG_NAME,
-                0,
-                winreg.REG_SZ,
-                _get_startup_command(start_minimized=start_minimized),
-            )
-        else:
-            try:
-                winreg.DeleteValue(key, APP_RUN_REG_NAME)
-            except FileNotFoundError:
-                pass
 
 # --- 自定义设置卡片 (替代 SliderSettingCard) ---
 class SliderSettingCard(SettingCard):
@@ -1373,9 +1311,6 @@ class Interface(QWidget):
         notify_duration_default = gui_config.get('notify_duration_sec', 5)
         filter_mute_default = gui_config.get('filter_mute', True)
         filter_official_default = gui_config.get('filter_official_article', True)
-        self.minimize_to_tray = bool(gui_config.get('minimize_to_tray', True))
-        self.start_minimized_to_tray = bool(gui_config.get('start_minimized_to_tray', False))
-        self.auto_launch_on_boot = bool(gui_config.get('auto_launch_on_boot', False))
         self.mute_usernames = gui_config.get('mute_usernames', [])
         if not isinstance(self.mute_usernames, list):
             self.mute_usernames = []
@@ -1455,38 +1390,6 @@ class Interface(QWidget):
         )
         self.sound_card.setChecked(self.enable_notification_sound)
         self.sound_card.checkedChanged.connect(self.on_sound_toggled)
-
-        # 8. 托盘与系统启动行为
-        self.close_to_tray_card = SwitchSettingCard(
-            getattr(FIF, "MINIMIZE", FIF.INFO),
-            "关闭时最小化到托盘",
-            "点击窗口关闭按钮时隐藏到托盘，需从托盘菜单退出程序"
-        )
-        self.close_to_tray_card.setChecked(self.minimize_to_tray)
-        self.close_to_tray_card.checkedChanged.connect(self.on_close_to_tray_toggled)
-
-        self.start_minimized_card = SwitchSettingCard(
-            getattr(FIF, "MINIMIZE", FIF.INFO),
-            "启动时最小化到托盘",
-            "程序启动后不显示主窗口，仅保留系统托盘图标"
-        )
-        self.start_minimized_card.setChecked(self.start_minimized_to_tray)
-        self.start_minimized_card.checkedChanged.connect(self.on_start_minimized_toggled)
-
-        self.auto_launch_card = SwitchSettingCard(
-            getattr(FIF, "POWER_BUTTON", FIF.INFO),
-            "开机自动启动",
-            "登录 Windows 后自动启动微信消息通知助手"
-        )
-        if self.auto_launch_on_boot and sys.platform == "win32":
-            try:
-                set_auto_launch_on_boot(True, self.start_minimized_to_tray)
-            except Exception as e:
-                logging.warning(f"同步开机启动配置失败：{e}")
-        self.auto_launch_card.setChecked(
-            self.auto_launch_on_boot or is_auto_launch_on_boot_enabled()
-        )
-        self.auto_launch_card.checkedChanged.connect(self.on_auto_launch_toggled)
         
         layout.addWidget(self.setting_group)
 
@@ -1513,16 +1416,8 @@ class Interface(QWidget):
         filters_row.addWidget(self.filter_official_card, 1)
         filters_row.addWidget(self.sound_card, 1)
 
-        startup_row = QHBoxLayout()
-        startup_row.setContentsMargins(0, 0, 0, 0)
-        startup_row.setSpacing(8)
-        startup_row.addWidget(self.close_to_tray_card, 1)
-        startup_row.addWidget(self.start_minimized_card, 1)
-        startup_row.addWidget(self.auto_launch_card, 1)
-
         compact_layout.addLayout(metrics_row)
         compact_layout.addLayout(filters_row)
-        compact_layout.addLayout(startup_row)
         layout.addWidget(compact_config_panel)
 
         # 手动过滤：使用独立面板，不放进 SettingCard，避免列表控件被固定行高压扁。
@@ -1780,54 +1675,6 @@ class Interface(QWidget):
             logging.warning(f"保存手动过滤配置失败：{e}")
             if show_tip:
                 InfoBar.error("保存失败", str(e), position=InfoBarPosition.TOP, parent=self)
-
-    def save_gui_option(self, key, value):
-        """保存单个 GUI 配置项。"""
-        try:
-            from utils.gui_config import save_config
-            if 'gui' not in self.config:
-                self.config['gui'] = {}
-            self.config['gui'][key] = value
-            save_config(self.config)
-        except Exception as e:
-            logging.warning(f"保存 GUI 配置失败：{key}={value}，{e}")
-            raise
-
-    def on_close_to_tray_toggled(self, checked):
-        self.minimize_to_tray = bool(checked)
-        try:
-            self.save_gui_option('minimize_to_tray', self.minimize_to_tray)
-        except Exception as e:
-            InfoBar.error("保存失败", str(e), position=InfoBarPosition.TOP, parent=self)
-
-    def on_start_minimized_toggled(self, checked):
-        self.start_minimized_to_tray = bool(checked)
-        try:
-            self.save_gui_option('start_minimized_to_tray', self.start_minimized_to_tray)
-            if self.auto_launch_card.isChecked():
-                set_auto_launch_on_boot(True, self.start_minimized_to_tray)
-        except Exception as e:
-            InfoBar.error("保存失败", str(e), position=InfoBarPosition.TOP, parent=self)
-
-    def on_auto_launch_toggled(self, checked):
-        enabled = bool(checked)
-        try:
-            set_auto_launch_on_boot(enabled, self.start_minimized_to_tray)
-            self.auto_launch_on_boot = enabled
-            self.save_gui_option('auto_launch_on_boot', enabled)
-            InfoBar.success(
-                "配置已保存",
-                "已开启开机自动启动" if enabled else "已关闭开机自动启动",
-                position=InfoBarPosition.TOP,
-                parent=self,
-                duration=2000
-            )
-        except Exception as e:
-            logging.warning(f"设置开机启动失败：{e}")
-            self.auto_launch_card.blockSignals(True)
-            self.auto_launch_card.setChecked(not enabled)
-            self.auto_launch_card.blockSignals(False)
-            InfoBar.error("开机启动设置失败", str(e), position=InfoBarPosition.TOP, parent=self)
 
     def on_sound_toggled(self, checked):
         self.enable_notification_sound = checked
@@ -2404,11 +2251,6 @@ class MainWindow(FluentWidget):
         self.showNormal()
         self.activateWindow()
         self.raise_()
-
-    def should_start_minimized(self, cli_minimized=False):
-        """是否应在启动后仅保留托盘图标。"""
-        gui_config = self.config.get('gui', {}) if isinstance(self.config, dict) else {}
-        return bool(cli_minimized or gui_config.get('start_minimized_to_tray', False))
     
     def quit_app(self):
         """退出应用"""
@@ -2425,20 +2267,18 @@ class MainWindow(FluentWidget):
     def closeEvent(self, event):
         """处理窗口关闭事件 - 最小化到托盘而不是退出"""
         try:
-            gui_config = self.config.get('gui', {}) if isinstance(self.config, dict) else {}
-            minimize_to_tray = bool(gui_config.get('minimize_to_tray', True))
-
-            # 配置启用时，关闭按钮只隐藏窗口；真正退出走托盘菜单“退出”。
-            if minimize_to_tray and hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            # 如果有后台服务在运行，则最小化到托盘
+            if self.interface.worker and self.interface.worker.running:
                 event.ignore()  # 忽略关闭事件
                 self.hide()  # 隐藏窗口
                 self.tray_icon.showMessage(
                     "微信消息通知助手",
-                    "已最小化到系统托盘，双击托盘图标可恢复窗口；退出请使用托盘菜单",
+                    "已最小化到系统托盘，双击托盘图标可恢复窗口",
                     QSystemTrayIcon.Information,
                     2000
                 )
             else:
+                # 如果服务未运行，直接退出
                 event.accept()
                 self.quit_app()
         except RuntimeError:
@@ -2499,7 +2339,6 @@ if __name__ == "__main__":
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
         app = QApplication(sys.argv)
-        app.setQuitOnLastWindowClosed(False)
         
         # 设置应用图标
         icon_path = os.path.join(os.path.dirname(__file__), 'src', 'img', 'WeChat.ico')
@@ -2511,13 +2350,8 @@ if __name__ == "__main__":
         logging.info("初始化主窗口...")
         w = MainWindow()
         logging.info("主窗口初始化完成")
-        cli_start_minimized = START_MINIMIZED_ARG in sys.argv[1:] or "--start-minimized" in sys.argv[1:]
-        if w.should_start_minimized(cli_start_minimized):
-            w.hide()
-            logging.info("已按配置启动并最小化到系统托盘")
-        else:
-            w.show()  # 正常显示主窗口
-            logging.info("主窗口已显示")
+        w.show()  # 正常显示主窗口
+        logging.info("主窗口已显示")
         
         logging.info("启动应用事件循环...")
         exit_code = sys.exit(app.exec_())
